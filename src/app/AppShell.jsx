@@ -25,7 +25,7 @@ const { Header, Content, Sider } = Layout
 
 const pageMeta = {
   dashboard: ['采集仪表盘', '实时监控全平台采集运行状况', '搜索批次、数据源…'],
-  ai: ['AI 分析队列', '处理活动分析任务，生成并校验采集配置', '搜索分析任务、网站或 URL…'],
+  ai: ['AI 分析', '创建、审核并追溯网站分析任务', '搜索分析任务、网站或 URL…'],
   sites: ['网站管理', '管理全部导入网站及其接入状态', '搜索网站名称、URL…'],
   tasks: ['采集管理', '管理采集计划、调度策略和运行参数', '搜索采集计划、网站或计划 ID…'],
   executions: ['采集记录', '查看每次生产执行的事实、问题和产物', '搜索批次 ID、采集计划、网站或 URL…'],
@@ -102,8 +102,8 @@ export function AppShell() {
   const navItems = useMemo(() => [
     { type: 'group', label: '总览', children: [{ key: 'dashboard', icon: <AppstoreOutlined />, label: '监控大盘', title: '监控大盘', 'aria-label': '监控大盘' }] },
     { type: 'group', label: '数据接入', children: [
+      { key: 'ai', icon: <FileSearchOutlined />, label: <span className="nav-label">AI 分析<Badge count={intakeNeedsHandling} /></span>, title: 'AI 分析', 'aria-label': 'AI 分析' },
       { key: 'sites', icon: <GlobalOutlined />, label: '网站管理', title: '网站管理', 'aria-label': '网站管理' },
-      { key: 'ai', icon: <FileSearchOutlined />, label: <span className="nav-label">AI 分析队列<Badge count={intakeNeedsHandling} /></span>, title: 'AI 分析队列', 'aria-label': 'AI 分析队列' },
       { key: 'tasks', icon: <ScheduleOutlined />, label: '采集管理', title: '采集管理', 'aria-label': '采集管理' },
     ] },
     { type: 'group', label: '运行管理', children: [

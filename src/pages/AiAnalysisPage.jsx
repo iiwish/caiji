@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Alert, App as AntApp, Button, Empty, Form, Input, Modal, Progress, Select, Table } from 'antd'
+import { Alert, App as AntApp, Button, Empty, Form, Input, Modal, Progress, Segmented, Select, Table, Upload } from 'antd'
 import {
   CaretRightOutlined,
   CheckCircleOutlined,
@@ -9,12 +9,14 @@ import {
   CopyOutlined,
   EditOutlined,
   ExpandAltOutlined,
+  InboxOutlined,
   PlusOutlined,
   ReloadOutlined,
   RobotOutlined,
   RocketOutlined,
 } from '@ant-design/icons'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
+import Papa from 'papaparse'
 import { StatusTag } from '../components/ConsoleUI'
 import { usePrototype } from '../app/PrototypeContext'
 
@@ -94,6 +96,29 @@ function normalizeHost(host) {
   return String(host || '').toLowerCase().replace(/^www\./, '')
 }
 
+function analysisRowsFromMatrix(matrix) {
+  const rows = matrix.map((cells) => {
+    const values = cells.map((cell) => String(cell || '').trim()).filter(Boolean)
+    const urlIndex = values.findIndex((cell) => {
+      try {
+        return ['http:', 'https:'].includes(new URL(cell).protocol)
+      } catch {
+        return false
+      }
+    })
+    if (urlIndex < 0) return null
+    const url = values[urlIndex]
+    const host = normalizeHost(getHost(url))
+    return { name: values.find((_, index) => index !== urlIndex) || '', url, host }
+  }).filter(Boolean)
+  return [...new Map(rows.map((row) => [row.host, row])).values()]
+}
+
+function parseAnalysisRows(value) {
+  const parsed = Papa.parse(String(value || '').replace(/^\uFEFF/, ''), { skipEmptyLines: true })
+  return analysisRowsFromMatrix(parsed.data)
+}
+
 function isActiveAnalysis(entry) {
   return !['审核完成', '已通过', '已完成', '已取消'].includes(entry.status)
 }
@@ -171,6 +196,7 @@ export function AiAnalysisPage() {
     executions,
     updateBatchUrl,
     approveBatchUrl,
+    importSites,
     startSiteAnalysis,
     runTask,
   } = usePrototype()
@@ -179,7 +205,12 @@ export function AiAnalysisPage() {
   const fromExecution = params.get('fromExecution')
   const fromFailure = params.get('fromFailure')
   const [selectedUrlId, setSelectedUrlId] = useState(entryFilter || '')
+  const [queueScope, setQueueScope] = useState('待处理')
   const [createOpen, setCreateOpen] = useState(false)
+  const [createMode, setCreateMode] = useState('new')
+  const [createFileName, setCreateFileName] = useState('')
+  const [createFileRows, setCreateFileRows] = useState([])
+  const [createFileLoading, setCreateFileLoading] = useState(false)
   const [rawPreview, setRawPreview] = useState(null)
   const [editingConfig, setEditingConfig] = useState(false)
   const [workingDraft, setWorkingDraft] = useState('')
@@ -211,13 +242,14 @@ export function AiAnalysisPage() {
     return timestamp(right) - timestamp(left) || left.urlIndex - right.urlIndex
   }), [intakeBatches])
   const activeEntries = useMemo(() => allEntries.filter(isActiveAnalysis), [allEntries])
-  const visibleEntries = useMemo(() => activeEntries.filter((entry) => (
+  const queueEntries = useMemo(() => queueScope === '全部记录' ? allEntries : activeEntries, [activeEntries, allEntries, queueScope])
+  const visibleEntries = useMemo(() => queueEntries.filter((entry) => (
     `${entry.site}${entry.url}${entry.batchName}${entry.status}`.toLowerCase().includes(search.toLowerCase())
-  )), [activeEntries, search])
+  )), [queueEntries, search])
   const requestedEntry = allEntries.find((entry) => entry.id === (entryFilter || selectedUrlId))
-  const selected = (requestedEntry?.releasePhase
-    ? requestedEntry
-    : activeEntries.find((entry) => entry.id === selectedUrlId || entry.id === entryFilter)) || activeEntries[0]
+  const selected = requestedEntry
+    || queueEntries.find((entry) => entry.id === selectedUrlId || entry.id === entryFilter)
+    || queueEntries[0]
   const occupiedAnalysisEntries = useMemo(() => allEntries.filter((entry) => isActiveAnalysis(entry)
     || ['candidate', 'validation_failed', 'ready_to_publish'].includes(entry.releasePhase)), [allEntries])
   const activeHosts = useMemo(() => new Set(occupiedAnalysisEntries.map((entry) => normalizeHost(getHost(entry.url)))), [occupiedAnalysisEntries])
@@ -226,16 +258,30 @@ export function AiAnalysisPage() {
     .map((site) => ({ value: site.id || site.host, label: `${site.name} · ${site.host}` })), [activeHosts, sites])
 
   useEffect(() => {
-    const releaseEntry = allEntries.find((entry) => entry.id === entryFilter && entry.releasePhase)
-    if (releaseEntry) {
-      if (releaseEntry.id !== selectedUrlId) setSelectedUrlId(releaseEntry.id)
+    if (!entryFilter) return
+    const entry = allEntries.find((item) => item.id === entryFilter)
+    if (entry && !isActiveAnalysis(entry)) setQueueScope('全部记录')
+  }, [allEntries, entryFilter])
+
+  useEffect(() => {
+    if (params.get('create') !== '1') return
+    setCreateMode('new')
+    setCreateOpen(true)
+    const nextParams = new URLSearchParams(params)
+    nextParams.delete('create')
+    setParams(nextParams, { replace: true })
+  }, [params, setParams])
+
+  useEffect(() => {
+    const requested = allEntries.find((entry) => entry.id === entryFilter)
+    if (requested) {
+      if (requested.id !== selectedUrlId) setSelectedUrlId(requested.id)
       return
     }
-    const contextualEntry = activeEntries.find((entry) => entry.id === entryFilter)
-      || activeEntries.find((entry) => normalizeHost(getHost(entry.url)) === normalizeHost(siteFilter))
-    const nextSelected = contextualEntry || activeEntries.find((entry) => entry.id === selectedUrlId) || activeEntries[0]
+    const contextualEntry = queueEntries.find((entry) => normalizeHost(getHost(entry.url)) === normalizeHost(siteFilter))
+    const nextSelected = contextualEntry || queueEntries.find((entry) => entry.id === selectedUrlId) || queueEntries[0]
     if ((nextSelected?.id || '') !== selectedUrlId) setSelectedUrlId(nextSelected?.id || '')
-  }, [activeEntries, allEntries, entryFilter, selectedUrlId, siteFilter])
+  }, [allEntries, entryFilter, queueEntries, selectedUrlId, siteFilter])
 
   const profile = selected ? buildProfile(selected) : null
   const baseConfigText = profile ? JSON.stringify(profile.config, null, 2) : ''
@@ -263,6 +309,19 @@ export function AiAnalysisPage() {
     setParams(paramsForEntry(entry), { replace: true })
     setEditingConfig(false)
     setRepairPrompt('')
+  }
+
+  const changeQueueScope = (scope) => {
+    setQueueScope(scope)
+    const entries = scope === '全部记录' ? allEntries : activeEntries
+    const current = entries.find((entry) => entry.id === selectedUrlId || entry.id === entryFilter)
+    const nextEntry = current || entries[0]
+    if (nextEntry) {
+      selectEntry(nextEntry)
+      return
+    }
+    setSelectedUrlId('')
+    setParams(new URLSearchParams(), { replace: true })
   }
 
   const updateSelected = (patch) => updateBatchUrl(selected.batchId, selected.id, patch)
@@ -318,6 +377,7 @@ export function AiAnalysisPage() {
   }
 
   const continueAnalysisQueue = () => {
+    setQueueScope('待处理')
     const nextEntry = activeEntries[0]
     if (!nextEntry) {
       setSelectedUrlId('')
@@ -372,8 +432,79 @@ export function AiAnalysisPage() {
     runAnalysis(prompt, revisedConfigText)
   }
 
+  const restartHistoricalAnalysis = () => {
+    const result = startSiteAnalysis({
+      siteName: selected.site,
+      siteHost: selected.siteHost || getHost(selected.url),
+      url: selected.url,
+      ruleId: selected.ruleId,
+      kind: selected.ruleId ? 'reanalyze' : 'onboarding',
+      parentAnalysisId: selected.id,
+      source: 'AI 分析历史',
+    })
+    setQueueScope('待处理')
+    setSelectedUrlId(result.entryId)
+    setParams(new URLSearchParams({ entry: result.entryId, site: normalizeHost(getHost(selected.url)) }), { replace: true })
+    message.success(result.existing ? '已打开该网站的活动分析任务' : '重新分析任务已创建')
+  }
+
+  const readAnalysisFile = async (file) => {
+    setCreateFileLoading(true)
+    try {
+      let matrix
+      if (file.name.toLowerCase().endsWith('.csv')) {
+        matrix = Papa.parse((await file.text()).replace(/^\uFEFF/, ''), { skipEmptyLines: true }).data
+      } else {
+        const module = await import('read-excel-file/browser')
+        const readXlsxFile = module.default || module
+        matrix = await readXlsxFile(file)
+      }
+      const rows = analysisRowsFromMatrix(matrix)
+      setCreateFileName(file.name)
+      setCreateFileRows(rows)
+      if (!rows.length) message.warning('文件中没有可识别的网站 URL')
+    } catch {
+      setCreateFileName('')
+      setCreateFileRows([])
+      message.error('文件解析失败，请检查 CSV 或 XLSX 格式')
+    } finally {
+      setCreateFileLoading(false)
+    }
+    return false
+  }
+
   const submitAnalysisTask = async () => {
     const values = await createForm.validateFields()
+    if (createMode !== 'existing') {
+      const rows = createMode === 'file' ? createFileRows : parseAnalysisRows(values.urls)
+      if (!rows.length) return message.warning('请输入至少一个有效的网站 URL')
+      importSites(rows, 'AI 分析')
+      const results = rows.map((row) => {
+        const existingSite = sites.find((site) => normalizeHost(site.host) === row.host)
+        const rule = rules.find((item) => normalizeHost(item.siteHost) === row.host)
+        return {
+          host: row.host,
+          ...startSiteAnalysis({
+            siteName: row.name || existingSite?.name || '待识别网站',
+            siteHost: row.host,
+            url: row.url,
+            ruleId: rule?.id,
+            kind: rule ? 'reanalyze' : 'onboarding',
+            source: 'AI 分析',
+          }),
+        }
+      })
+      const first = results[0]
+      setQueueScope('待处理')
+      setSelectedUrlId(first.entryId)
+      setParams(new URLSearchParams({ entry: first.entryId, site: first.host }), { replace: true })
+      setCreateOpen(false)
+      createForm.resetFields()
+      setCreateFileName('')
+      setCreateFileRows([])
+      message.success(`已创建 ${results.length} 个分析任务，网站资产已同步`)
+      return
+    }
     const site = sites.find((item) => (item.id || item.host) === values.siteId)
     if (!site) return message.error('网站资产不存在，请重新选择')
     const rule = rules.find((item) => normalizeHost(item.siteHost) === normalizeHost(site.host))
@@ -383,34 +514,88 @@ export function AiAnalysisPage() {
       url: site.entryUrl || `https://${site.host}`,
       ruleId: rule?.id,
       kind: rule ? 'reanalyze' : 'onboarding',
+      source: 'AI 分析',
     })
+    setQueueScope('待处理')
     setSelectedUrlId(result.entryId)
     setParams(new URLSearchParams({ entry: result.entryId, site: site.host }), { replace: true })
     setCreateOpen(false)
     createForm.resetFields()
+    setCreateFileName('')
+    setCreateFileRows([])
     message.success(result.existing ? '已打开该网站的活动分析任务' : 'AI 分析任务已创建')
+  }
+
+  const closeCreateModal = () => {
+    setCreateOpen(false)
+    createForm.resetFields()
+    setCreateFileName('')
+    setCreateFileRows([])
+    setCreateFileLoading(false)
   }
 
   const taskModal = (
     <Modal
       title="新建 AI 分析任务"
       open={createOpen}
-      onCancel={() => setCreateOpen(false)}
+      onCancel={closeCreateModal}
       onOk={submitAnalysisTask}
       okText="创建并开始分析"
       width={560}
-      okButtonProps={{ disabled: !availableSites.length }}
+      okButtonProps={{ disabled: (createMode === 'existing' && !availableSites.length) || (createMode === 'file' && !createFileRows.length) }}
     >
       <Form form={createForm} layout="vertical">
-        <Form.Item name="siteId" label="网站资产" rules={[{ required: true, message: '请选择需要分析的网站' }]}>
-          <Select
-            showSearch
-            optionFilterProp="label"
-            placeholder={availableSites.length ? '选择网站或搜索域名' : '所有网站均有活动分析任务'}
-            options={availableSites}
-            notFoundContent="没有可创建任务的网站"
-          />
-        </Form.Item>
+        <Segmented
+          block
+          className="ai-create-mode"
+          value={createMode}
+          options={[{ value: 'new', label: '新增 URL' }, { value: 'file', label: '导入文件' }, { value: 'existing', label: '已有网站' }]}
+          onChange={(value) => {
+            setCreateMode(value)
+            createForm.resetFields()
+            setCreateFileName('')
+            setCreateFileRows([])
+          }}
+        />
+        {createMode === 'new' ? (
+          <Form.Item
+            name="urls"
+            label="网站 URL"
+            rules={[{
+              validator: (_, value) => parseAnalysisRows(value).length
+                ? Promise.resolve()
+                : Promise.reject(new Error('请输入至少一个有效的网站 URL')),
+            }]}
+          >
+            <Input.TextArea
+              autoSize={{ minRows: 6, maxRows: 10 }}
+              placeholder={'每行一个 URL，也可填写“网站名称,URL”\nhttps://example.com/notices\n示例采购网,https://procurement.example.com/list'}
+              spellCheck={false}
+            />
+          </Form.Item>
+        ) : createMode === 'file' ? (
+          <Upload.Dragger
+            className="ai-create-upload"
+            accept=".csv,.xlsx"
+            maxCount={1}
+            showUploadList={false}
+            beforeUpload={readAnalysisFile}
+          >
+            <p className="ant-upload-drag-icon"><InboxOutlined /></p>
+            <p className="ant-upload-text">{createFileLoading ? '正在解析文件' : createFileName || '选择 CSV 或 XLSX 文件'}</p>
+            <p className="ant-upload-hint">{createFileRows.length ? `已识别 ${createFileRows.length} 个网站 URL` : '支持网站名称、网站 URL 两列'}</p>
+          </Upload.Dragger>
+        ) : (
+          <Form.Item name="siteId" label="网站资产" rules={[{ required: true, message: '请选择需要分析的网站' }]}>
+            <Select
+              showSearch
+              optionFilterProp="label"
+              placeholder={availableSites.length ? '选择网站或搜索域名' : '所有网站均有活动分析任务'}
+              options={availableSites}
+              notFoundContent="没有可创建任务的网站"
+            />
+          </Form.Item>
+        )}
       </Form>
     </Modal>
   )
@@ -420,13 +605,16 @@ export function AiAnalysisPage() {
       <div className="page-content ai-analysis-layout ai-analysis-empty-layout">
         <section className="analysis-surface ai-analysis-queue">
           <header className="ai-queue-header">
-            <div><div className="ai-queue-title"><h2>分析队列</h2><span className="ai-section-count">0 个任务</span></div><p>当前没有活动分析任务</p></div>
-            <Button type="primary" size="small" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新建任务</Button>
+            <div className="ai-queue-title"><h2>分析任务</h2><span className="ai-section-count">{queueEntries.length} 个</span></div>
+            <Button type="primary" size="small" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新建分析</Button>
           </header>
+          <div className="ai-queue-scope">
+            <Segmented block value={queueScope} options={[{ value: '待处理', label: `待处理 ${activeEntries.length}` }, { value: '全部记录', label: `全部记录 ${allEntries.length}` }]} onChange={changeQueueScope} />
+          </div>
         </section>
         <main className="analysis-surface ai-empty-workbench">
-          <Empty description="当前没有活动分析任务">
-            <Button onClick={() => navigate('/sites')}>前往网站管理</Button>
+          <Empty description={queueScope === '待处理' ? '当前没有待处理的分析任务' : '暂无分析记录'}>
+            <Button onClick={() => navigate('/sites')}>查看网站资产</Button>
             <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新建分析任务</Button>
           </Empty>
         </main>
@@ -466,6 +654,7 @@ export function AiAnalysisPage() {
   ]
   const releasePhase = selected.releasePhase || ''
   const isReleaseHandoff = releasePhase === 'published'
+  const isHistorical = !isActiveAnalysis(selected)
   const releaseVersion = selected.releaseVersion || selectedRule?.version || '-'
   const approvalNextLabel = selectedSourceExecution
     ? '重跑失败任务'
@@ -484,22 +673,26 @@ export function AiAnalysisPage() {
     <div className="page-content ai-analysis-layout">
       <section className="analysis-surface ai-analysis-queue">
         <header className="ai-queue-header">
-          <div>
-            <div className="ai-queue-title">
-              <h2>分析队列</h2>
-              <span className="ai-section-count">{activeEntries.length} 个任务</span>
-            </div>
-            <p>进行中、待审核与需订正</p>
+          <div className="ai-queue-title">
+            <h2>分析任务</h2>
+            <span className="ai-section-count">{queueEntries.length} 个</span>
           </div>
-          <Button type="primary" size="small" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新建任务</Button>
+          <Button type="primary" size="small" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新建分析</Button>
         </header>
+        <div className="ai-queue-scope">
+          <Segmented block value={queueScope} options={[{ value: '待处理', label: `待处理 ${activeEntries.length}` }, { value: '全部记录', label: `全部记录 ${allEntries.length}` }]} onChange={changeQueueScope} />
+        </div>
         <div className="ai-analysis-queue-list">
           {visibleEntries.map((entry) => (
             <button className={`ai-analysis-item ${entry.id === selected.id ? 'active' : ''}`} key={entry.id} onClick={() => selectEntry(entry)} aria-pressed={entry.id === selected.id}>
               <span className="ai-analysis-item-top"><strong>{entry.site}</strong><StatusTag value={displayStatus(entry.status)} /></span>
               <span className="ai-analysis-item-entry">
                 <span className="mono ai-analysis-item-url" title={`${entry.id} · ${entry.url}`}>{entry.url}</span>
-                <span className="mono ai-analysis-item-confidence" title="置信度">{entry.status === '分析中' ? '解析中' : `${entry.confidence || buildProfile(entry).confidence}%`}</span>
+                <span className="mono ai-analysis-item-confidence" title={isActiveAnalysis(entry) ? '置信度' : '分析结果'}>{entry.status === '分析中'
+                  ? '解析中'
+                  : isActiveAnalysis(entry)
+                    ? `${entry.confidence || buildProfile(entry).confidence}%`
+                    : entry.releaseVersion || '已归档'}</span>
               </span>
             </button>
           ))}
@@ -549,12 +742,28 @@ export function AiAnalysisPage() {
             <span className="mono">{selected.url}</span>
           </div>
           <div className="ai-detail-actions">
-            <Button icon={<ReloadOutlined />} disabled={isRestarting} onClick={() => runAnalysis()}>{selected.status === '分析中' ? '重新开始分析' : '重新分析'}</Button>
-            <Button type="primary" icon={<CheckOutlined />} title={reviewBlockedReason} disabled={Boolean(reviewBlockedReason)} onClick={approveSelected}>{selected.status === '待确认归属' ? '确认规则' : reviewBlockedReason ? '暂不可审核' : '审核通过'}</Button>
+            {isHistorical ? (
+              <Button type="primary" icon={<ReloadOutlined />} onClick={restartHistoricalAnalysis}>重新分析</Button>
+            ) : (
+              <>
+                <Button icon={<ReloadOutlined />} disabled={isRestarting} onClick={() => runAnalysis()}>{selected.status === '分析中' ? '重新开始分析' : '重新分析'}</Button>
+                <Button type="primary" icon={<CheckOutlined />} title={reviewBlockedReason} disabled={Boolean(reviewBlockedReason)} onClick={approveSelected}>{selected.status === '待确认归属' ? '确认规则' : reviewBlockedReason ? '暂不可审核' : '审核通过'}</Button>
+              </>
+            )}
           </div>
         </section>
 
-        {selected.analysisKind === 'diagnose' && (
+        {isHistorical && (
+          <Alert
+            className="ai-flow-context"
+            type="success"
+            showIcon
+            title="历史分析记录"
+            description={`分析结果已归档${selected.ruleId ? `，关联规则 ${selected.ruleId}${selected.releaseVersion ? ` · ${selected.releaseVersion}` : ''}` : ''}。重新分析将创建一条新任务，不会覆盖当前记录。`}
+          />
+        )}
+
+        {!isHistorical && selected.analysisKind === 'diagnose' && (
             <Alert
             className="ai-flow-context"
             type="warning"
@@ -564,7 +773,7 @@ export function AiAnalysisPage() {
           />
         )}
 
-        {selected.analysisKind === 'onboarding' && (
+        {!isHistorical && selected.analysisKind === 'onboarding' && (
           <Alert
               className="ai-flow-context"
               type="info"
@@ -574,7 +783,7 @@ export function AiAnalysisPage() {
           />
         )}
 
-        {!isAnalyzing && (
+        {!isHistorical && !isAnalyzing && (
           <Alert
             className="ai-flow-context ai-auto-regression"
             type={automaticRegression.passed ? 'success' : 'error'}
@@ -617,7 +826,9 @@ export function AiAnalysisPage() {
               <header className="ai-section-header ai-config-header">
                 <div><CodeOutlined /><h2>生成的采集配置</h2><span className="ai-config-kind">下载器配置 · JSON</span></div>
                 <div className="ai-config-actions">
-                  {editingConfig ? (
+                  {isHistorical ? (
+                    <Button size="small" icon={<CopyOutlined />} onClick={copyConfig}>复制</Button>
+                  ) : editingConfig ? (
                     <>
                       <Button size="small" icon={<CloseOutlined />} onClick={() => setEditingConfig(false)}>取消</Button>
                       <Button type="primary" size="small" icon={<CheckOutlined />} onClick={saveConfigCorrection}>保存并自动回归</Button>
@@ -639,11 +850,13 @@ export function AiAnalysisPage() {
               )}
             </section>
 
-            <section className="analysis-surface ai-correction-card">
-              <div className="ai-correction-title"><RobotOutlined /><h2>二次分析 · 修正提示词</h2></div>
-              <Input.TextArea rows={3} value={repairPrompt} onChange={(event) => setRepairPrompt(event.target.value)} placeholder="例如：列表容器应为 div.m_list，请重新定位「采购单位」字段…" />
-              <div className="ai-correction-footer"><span>AI 将结合你的提示重新解析页面结构并生成新代码</span><Button className="ai-submit-analysis" type="primary" icon={<CaretRightOutlined />} onClick={submitCorrection}>提交二次分析</Button></div>
-            </section>
+            {!isHistorical && (
+              <section className="analysis-surface ai-correction-card">
+                <div className="ai-correction-title"><RobotOutlined /><h2>二次分析 · 修正提示词</h2></div>
+                <Input.TextArea rows={3} value={repairPrompt} onChange={(event) => setRepairPrompt(event.target.value)} placeholder="例如：列表容器应为 div.m_list，请重新定位「采购单位」字段…" />
+                <div className="ai-correction-footer"><span>AI 将结合你的提示重新解析页面结构并生成新代码</span><Button className="ai-submit-analysis" type="primary" icon={<CaretRightOutlined />} onClick={submitCorrection}>提交二次分析</Button></div>
+              </section>
+            )}
           </>
         )}
           </>

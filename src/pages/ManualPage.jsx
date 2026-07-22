@@ -69,20 +69,20 @@ const JOURNEYS = {
     label: '导入网站、AI 分析并配置采集',
     shortLabel: '网站接入与首次采集',
     icon: <GlobalOutlined />,
-    summary: '适用于首次接入新网站。从 URL 资产入库开始，经 AI 识别和规则发布，创建采集计划并完成首次执行验收。',
-    route: ['导入网站 URL', 'AI 分析并发布', '配置采集计划', '执行并验收'],
-    startLabel: '打开网站管理',
-    startPath: '/sites',
+    summary: '适用于首次接入新网站。从创建 AI 分析任务开始，系统同步网站资产，经规则发布后配置采集计划并完成首次执行验收。',
+    route: ['新建分析任务', 'AI 分析并发布', '配置采集计划', '执行并验收'],
+    startLabel: '打开 AI 分析',
+    startPath: '/ai',
     steps: [
       {
         id: 'onboarding-import',
-        title: '导入网站 URL 并创建分析任务',
-        description: '进入网站管理，点击“新增 URL”。可直接粘贴多行 URL，也可导入 CSV 或 XLSX。未填写的网站名称会从网页标题和站点信息中识别，显式填写的名称优先。',
-        actions: ['每行填写一个 URL，或使用“网站名称,URL”格式', '核对预览中的网站名称、URL 和校验状态', '保持“新增后立即创建 AI 分析任务”开启，点击“新增并分析”'],
-        checkpoint: '完成标志：网站资产已入库，每个有效 URL 都进入 AI 分析队列；重复域名会合并到同一网站。',
-        image: '/manual/site-import.jpg',
-        imageAlt: '新增 URL 弹窗展示批量粘贴和网站名称识别预览',
-        caption: '预览会复用已知网站名称；暂未识别的名称标记为“待 AI 识别”，不会用域名冒充名称。',
+        title: '新建分析任务并同步网站资产',
+        description: '进入 AI 分析，点击“新建分析”。可以粘贴一个或多个 URL、导入 CSV 或 XLSX，也可以选择已有网站重新分析。新域名会自动加入网站资产库，重复域名复用已有资产。',
+        actions: ['每行填写一个 URL，或使用“网站名称,URL”格式', '批量文件使用网站名称、网站 URL 两列', '点击“创建并开始分析”，留在分析工作台等待结果'],
+        checkpoint: '完成标志：每个有效 URL 都创建了分析任务，对应网站资产已自动新增或更新。',
+        image: null,
+        imageAlt: '',
+        caption: '',
       },
       {
         id: 'onboarding-analyze',
@@ -107,8 +107,8 @@ const JOURNEYS = {
       {
         id: 'onboarding-run',
         title: '执行首次采集并检查入库结果',
-        description: '启用后可立即执行，也可等待调度。进入采集记录跟踪运行状态；成功后打开采集明细，检查采集量和字段内容，再到原文库抽查正文、质量状态和来源追溯。',
-        actions: ['运行中关注发现量、入库量、耗时和日志', '成功后抽查多条采集明细，不只检查状态标签', '发现字段为空或结构错误时，回到 AI 分析重新订正规则'],
+        description: '启用后可立即执行，也可等待调度。点击“立即执行”后留在采集配置页，通过“最近执行”查看状态与采集量；需要检查日志和明细时再进入采集记录。',
+        actions: ['在采集配置页确认最近执行从“运行中”变为“成功”', '点击“查看详情”抽查多条采集明细，不只检查状态标签', '发现字段为空或结构错误时，回到 AI 分析重新订正规则'],
         checkpoint: '闭环标准：采集执行成功、有效数据已入库、抽查字段正确，后续调度已按计划生效。',
         image: '/manual/execution-result.jpg',
         imageAlt: '成功采集批次展示入库数据明细',
@@ -137,7 +137,7 @@ export function ManualPage() {
         <div className="manual-intro-meta">
           <span>2 条用户旅程</span>
           <span>8 个操作阶段</span>
-          <span>截图更新于 2026-07-21</span>
+          <span>内容更新于 2026-07-22</span>
         </div>
       </section>
 
@@ -187,10 +187,12 @@ export function ManualPage() {
                 {step.actions.map((action) => <li key={action}>{action}</li>)}
               </ol>
               <div className="manual-checkpoint"><CheckCircleOutlined /><span>{step.checkpoint}</span></div>
-              <figure>
-                <Image src={step.image} alt={step.imageAlt} preview={{ mask: '查看大图' }} />
-                <figcaption>{step.caption}</figcaption>
-              </figure>
+              {step.image && (
+                <figure>
+                  <Image src={step.image} alt={step.imageAlt} preview={{ mask: '查看大图' }} />
+                  <figcaption>{step.caption}</figcaption>
+                </figure>
+              )}
             </section>
           ))}
 

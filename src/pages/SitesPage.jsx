@@ -5,12 +5,10 @@ import {
   Button,
   Descriptions,
   Grid,
-  Input,
   Modal,
   Pagination,
   Segmented,
   Space,
-  Switch,
   Table,
   Tooltip,
 } from 'antd'
@@ -19,18 +17,14 @@ import {
   CheckOutlined,
   ClockCircleOutlined,
   CodeOutlined,
-  DownloadOutlined,
-  InboxOutlined,
   InfoCircleOutlined,
   LineChartOutlined,
-  PlusOutlined,
   RobotOutlined,
   SettingOutlined,
   UnorderedListOutlined,
   WarningOutlined,
 } from '@ant-design/icons'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
-import Papa from 'papaparse'
 import { RowActions, SourceCell, StatusTag } from '../components/ConsoleUI'
 import { usePrototype } from '../app/PrototypeContext'
 import { getSiteRulePath } from '../app/routes'
@@ -53,61 +47,6 @@ function isActiveAnalysis(entry) {
   return !['审核完成', '已通过', '已完成', '已取消'].includes(entry.status)
 }
 
-function isValidWebsiteUrl(url) {
-  try {
-    return ['http:', 'https:'].includes(new URL(url).protocol)
-  } catch {
-    return false
-  }
-}
-
-function workbookRowsToSites(matrix) {
-  if (!matrix.length) return []
-  const normalizedHeader = matrix[0].map((value) => String(value || '').trim().toLowerCase())
-  const aliases = {
-    name: ['名称', '网站名称', '数据源', 'name'],
-    url: ['网址', '网站url', 'url', '入口url'],
-    freq: ['采集频率', '频率', 'frequency'],
-  }
-  const findColumn = (field, fallback) => {
-    const index = normalizedHeader.findIndex((value) => aliases[field].includes(value))
-    return index >= 0 ? index : fallback
-  }
-  const hasHeader = normalizedHeader.some((value) => Object.values(aliases).flat().includes(value))
-  const nameIndex = findColumn('name', 0)
-  const urlIndex = findColumn('url', 1)
-  const freqIndex = findColumn('freq', 2)
-  return matrix.slice(hasHeader ? 1 : 0).map((row, index) => {
-    const firstCell = String(row[0] || '').trim()
-    const secondCell = String(row[1] || '').trim()
-    const isUrlOnlyRow = isValidWebsiteUrl(firstCell) && !isValidWebsiteUrl(secondCell)
-    const url = isUrlOnlyRow ? firstCell : String(row[urlIndex] || '').trim()
-    const name = isUrlOnlyRow ? '' : String(row[nameIndex] || '').trim()
-    const freq = isUrlOnlyRow ? secondCell : String(row[freqIndex] || '').trim()
-    return { key: `IMPORT-${index}`, name, url, freq, valid: isValidWebsiteUrl(url) }
-  }).filter((row) => row.name || row.url)
-}
-
-function pastedTextToSites(value) {
-  const parsed = Papa.parse(value.replace(/^\uFEFF/, ''), { skipEmptyLines: true })
-  return workbookRowsToSites(parsed.data)
-}
-
-function resolveKnownSiteNames(rows, sites) {
-  return rows.map((row) => {
-    if (row.name) return { ...row, nameSource: 'provided' }
-    const host = getUrlHost(row.url)
-    const existing = sites.find((site) => normalizeHost(site.host) === host)
-    const knownName = String(existing?.name || '').trim()
-    const canReuseName = knownName && normalizeHost(knownName) !== host && knownName !== '待识别网站'
-    return {
-      ...row,
-      name: canReuseName ? knownName : '',
-      nameSource: canReuseName ? 'recognized' : 'pending',
-    }
-  })
-}
-
 function getSiteId(site) {
   if (site.id) return site.id
   if (Number.isInteger(site.key)) return `WS-${String(site.key + 1).padStart(3, '0')}`
@@ -121,18 +60,11 @@ export function SitesPage() {
   const screens = Grid.useBreakpoint()
   const { search } = useOutletContext()
   const [params, setParams] = useSearchParams()
-  const { sites, tasks, rules, intakeBatches, importSites, startSiteAnalysis } = usePrototype()
+  const { sites, tasks, rules, intakeBatches, startSiteAnalysis } = usePrototype()
   const [scope, setScope] = useState('全部')
   const [view, setView] = useState('list')
   const [page, setPage] = useState(1)
   const [selected, setSelected] = useState(null)
-  const [importOpen, setImportOpen] = useState(false)
-  const [importRows, setImportRows] = useState([])
-  const [importFileName, setImportFileName] = useState('')
-  const [importLoading, setImportLoading] = useState(false)
-  const [importMethod, setImportMethod] = useState('paste')
-  const [pastedUrls, setPastedUrls] = useState('')
-  const [analyzeAfterImport, setAnalyzeAfterImport] = useState(true)
 
   const activeAnalyses = useMemo(() => intakeBatches
     .flatMap((batch) => batch.urls.map((entry) => ({ ...entry, batchId: batch.id })))
@@ -254,91 +186,6 @@ export function SitesPage() {
     return '采集配置'
   }
 
-  const handleImportFile = async (file) => {
-    setImportLoading(true)
-    try {
-      const isCsv = file.name.toLowerCase().endsWith('.csv')
-      let matrix
-      if (isCsv) {
-        const result = Papa.parse((await file.text()).replace(/^\uFEFF/, ''), { skipEmptyLines: true })
-        matrix = result.data
-      } else {
-        const module = await import('read-excel-file/browser')
-        const readXlsxFile = module.default || module
-        matrix = await readXlsxFile(file)
-      }
-      const rows = resolveKnownSiteNames(workbookRowsToSites(matrix), sites)
-      setImportRows(rows)
-      setImportFileName(file.name)
-      if (!rows.length) message.warning('文件中没有可识别的网站数据')
-    } catch {
-      setImportRows([])
-      setImportFileName('')
-      message.error('文件解析失败，请检查 CSV 或 Excel 列格式')
-    } finally {
-      setImportLoading(false)
-    }
-  }
-
-  const submitImport = () => {
-    const validRows = importRows.filter((row) => row.valid)
-    if (!validRows.length) return message.warning('没有可导入的网站，请先检查文件内容')
-    const uniqueRows = [...new Map(validRows.map((row) => [getUrlHost(row.url), row])).values()]
-    const source = importFileName || (importMethod === 'paste' ? '批量粘贴' : '批量导入')
-    const result = importSites(uniqueRows, source)
-    const analysisResults = analyzeAfterImport ? uniqueRows.map((row) => {
-      const host = getUrlHost(row.url)
-      const rule = rules.find((item) => normalizeHost(item.siteHost) === host)
-      return {
-        host,
-        ...startSiteAnalysis({
-          siteName: row.name || '待识别网站',
-          siteHost: host,
-          url: row.url,
-          ruleId: rule?.id,
-          kind: rule ? 'reanalyze' : 'onboarding',
-        }),
-      }
-    }) : []
-    setImportOpen(false)
-    setImportRows([])
-    setImportFileName('')
-    setPastedUrls('')
-    setScope('全部')
-    setPage(1)
-    if (analysisResults.length) {
-      message.success(`已新增 ${result.created} 个、更新 ${result.updated} 个网站，并创建 ${analysisResults.length} 个分析任务`)
-      navigate(`/ai?entry=${encodeURIComponent(analysisResults[0].entryId)}&site=${encodeURIComponent(analysisResults[0].host)}`)
-      return
-    }
-    message.success(`新增完成：新增 ${result.created} 个，更新 ${result.updated} 个网站`)
-  }
-
-  const updatePastedUrls = (value) => {
-    setPastedUrls(value)
-    setImportRows(resolveKnownSiteNames(pastedTextToSites(value), sites))
-    setImportFileName(value.trim() ? '批量粘贴' : '')
-  }
-
-  const openBulkImport = () => {
-    setImportMethod('paste')
-    setImportRows([])
-    setImportFileName('')
-    setPastedUrls('')
-    setAnalyzeAfterImport(true)
-    setImportOpen(true)
-  }
-
-  const downloadTemplate = () => {
-    const csv = '\uFEFF网站名称,网站URL,采集频率\n湖北省公共资源交易中心,https://ggzy.hubei.gov.cn/notice/list,每 1 小时\n四川省招标投标网,https://cdzbtb.com/notice/list,每 2 小时\n'
-    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
-    const anchor = document.createElement('a')
-    anchor.href = url
-    anchor.download = '网站导入模板.csv'
-    anchor.click()
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
-  }
-
   const closeSite = () => {
     setSelected(null)
     const nextParams = new URLSearchParams(params)
@@ -346,13 +193,6 @@ export function SitesPage() {
     nextParams.delete('tab')
     setParams(nextParams, { replace: true })
   }
-
-  const importColumns = [
-    { title: '网站名称', dataIndex: 'name', width: 180, render: (value) => value || <span className="site-import-name-pending"><RobotOutlined />待 AI 识别</span> },
-    { title: '网站 URL', dataIndex: 'url', render: (value) => <span className="mono site-import-url">{value || '—'}</span> },
-    { title: '采集频率', dataIndex: 'freq', width: 100, render: (value) => value || '待配置' },
-    { title: '校验', dataIndex: 'valid', width: 78, render: (value) => <span className={`site-import-validation ${value ? 'valid' : 'invalid'}`}>{value ? '可新增' : '需检查'}</span> },
-  ]
 
   const columns = [
     {
@@ -445,7 +285,6 @@ export function SitesPage() {
             ]}
           />
         </Tooltip>
-        <Button type="primary" icon={<PlusOutlined />} onClick={openBulkImport}>新增 URL</Button>
       </div>
 
       {view === 'list' ? (
@@ -524,55 +363,6 @@ export function SitesPage() {
           ]} /><Alert className="site-health-alert" type={selected.status === '需处理' ? 'error' : selected.analysisEntry ? 'info' : selectedRule ? 'success' : 'warning'} showIcon title={selected.status === '需处理' ? '网站访问或采集规则需要处理，但不会改变已有采集计划和执行记录。' : selected.analysisEntry ? '该网站已有活动分析任务，可前往 AI 分析继续处理。' : selectedRule ? '该网站资产的 URL、访问方式和采集规则已经就绪。' : '网站资产已入库，尚未创建 AI 分析任务。'} /></div>}
       </Modal>
 
-      <Modal
-        className="site-import-modal"
-        title="新增 URL"
-        open={importOpen}
-        onCancel={() => setImportOpen(false)}
-        width={760}
-        footer={<div className="site-import-footer"><Button type="link" icon={<DownloadOutlined />} onClick={downloadTemplate}>下载 CSV 模板</Button><span /><Button onClick={() => setImportOpen(false)}>取消</Button><Button type="primary" disabled={!importRows.some((row) => row.valid)} onClick={submitImport}>{analyzeAfterImport ? '新增并分析' : '新增'} {importRows.filter((row) => row.valid).length} 个 URL</Button></div>}
-      >
-        <Segmented
-          block
-          className="site-import-method"
-          value={importMethod}
-          options={[{ value: 'paste', label: '粘贴 URL' }, { value: 'file', label: '导入文件' }]}
-          onChange={(value) => {
-            setImportMethod(value)
-            setImportRows(value === 'paste' ? resolveKnownSiteNames(pastedTextToSites(pastedUrls), sites) : [])
-            setImportFileName(value === 'paste' && pastedUrls.trim() ? '批量粘贴' : '')
-          }}
-        />
-        {importMethod === 'paste' ? (
-          <div className="site-import-paste">
-            <Input.TextArea
-              value={pastedUrls}
-              onChange={(event) => updatePastedUrls(event.target.value)}
-              placeholder={'每行一个 URL，也可填写“网站名称,URL”\nhttps://example.com/notices\n示例采购网,https://procurement.example.com/list'}
-              autoSize={{ minRows: 6, maxRows: 10 }}
-              spellCheck={false}
-            />
-            <span>支持直接粘贴多行 URL；未填写名称时，系统将从网页标题和站点信息中识别网站名称。</span>
-          </div>
-        ) : (
-          <label className={`site-import-dropzone ${importLoading ? 'loading' : ''}`}>
-            <input type="file" accept=".csv,.xlsx" onChange={(event) => { const file = event.target.files?.[0]; if (file) handleImportFile(file); event.target.value = '' }} />
-            <span className="site-import-drop-icon"><InboxOutlined /></span>
-            <strong>{importLoading ? '正在解析文件' : '选择 CSV 或 XLSX 文件'}</strong>
-            <span>列：网站名称、网站 URL、采集频率</span>
-          </label>
-        )}
-        <div className="site-import-analysis-option">
-          <div><strong>新增后立即创建 AI 分析任务</strong><span>每个 URL 独立分析，结果统一进入 AI 分析队列</span></div>
-          <Switch checked={analyzeAfterImport} onChange={setAnalyzeAfterImport} />
-        </div>
-        {importRows.length > 0 && (
-          <section className="site-import-preview">
-            <header><div><CheckOutlined /><span>已从 <strong>{importFileName}</strong> 解析到 {importRows.length} 条记录</span></div><span>{importRows.filter((row) => row.valid).length} 条可新增</span></header>
-            <Table rowKey="key" size="small" columns={importColumns} dataSource={importRows.slice(0, 8)} pagination={false} scroll={{ x: 650 }} />
-          </section>
-        )}
-      </Modal>
     </div>
   )
 }

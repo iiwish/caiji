@@ -163,6 +163,7 @@ export function TasksPage() {
   const [draft, setDraft] = useState(null)
   const [editingTitle, setEditingTitle] = useState(false)
   const [titleBeforeEdit, setTitleBeforeEdit] = useState('')
+  const [focusedExecutionId, setFocusedExecutionId] = useState('')
   const selectedTask = tasks.find((task) => task.id === selectedTaskId) || null
   const contextSite = siteFilter ? sites.find((site) => site.host === siteFilter) : null
   const contextRule = siteFilter ? rules.find((rule) => rule.siteHost === siteFilter) : null
@@ -401,8 +402,8 @@ export function TasksPage() {
       message.warning('当前配置暂时无法执行')
       return
     }
-    message.success(`已创建${draft.collectionMode === '全量' ? '全量' : '增量'}采集批次`)
-    navigate(`/executions/${executionId}`)
+    setFocusedExecutionId(executionId)
+    message.success(`配置已保存，${draft.collectionMode === '全量' ? '全量' : '增量'}采集批次 ${executionId} 已启动`)
   }
 
   const columns = [
@@ -463,6 +464,11 @@ export function TasksPage() {
   const boundAuthFunction = draft ? AUTH_FUNCTIONS.find((item) => item.value === draft.authFunctionId) : null
   const isCreating = Boolean(createRequested && draft?.isNew)
   const canCreateTask = Boolean(isCreating && draft.name.trim() && draft.siteHost && isRuleReady(selectedRule))
+  const latestExecution = selectedTask
+    ? executions.find((execution) => execution.id === focusedExecutionId && execution.taskId === selectedTask.id)
+      || executions.find((execution) => execution.taskId === selectedTask.id)
+    : null
+  const latestExecutionRunning = latestExecution && ['运行中', '重试中'].includes(latestExecution.status)
 
   if ((selectedTask || isCreating) && draft) {
     return (
@@ -519,6 +525,20 @@ export function TasksPage() {
             </>}
           </div>
         </section>
+
+        {!isCreating && latestExecution && (
+          <div className="collection-execution-strip" aria-live="polite">
+            <div className="collection-execution-summary">
+              <span>最近执行</span>
+              <StatusTag value={latestExecution.status} />
+              <strong className="mono">{latestExecution.id}</strong>
+              <small>{latestExecutionRunning
+                ? `${latestExecution.collectionType || '采集任务'}正在运行`
+                : `采集 ${latestExecution.articles || 0} 条 · ${latestExecution.duration || '-'}`}</small>
+            </div>
+            <Button type="link" onClick={() => navigate(`/executions/${latestExecution.id}`)}>查看详情</Button>
+          </div>
+        )}
 
         <section className="collection-config-surface collection-config-section collection-basic-section">
           <div className="collection-section-heading">

@@ -389,7 +389,7 @@ export function PrototypeProvider({ children }) {
     return { created, updated, skipped, siteIds }
   }
 
-  const startSiteAnalysis = ({ siteName, siteHost, url, ruleId, kind = 'reanalyze', failureId = '', sourceExecutionId = '' }) => {
+  const startSiteAnalysis = ({ siteName, siteHost, url, ruleId, kind = 'reanalyze', failureId = '', sourceExecutionId = '', parentAnalysisId = '', source = '' }) => {
     const normalizedHost = normalizeHost(siteHost || getUrlHost(url))
     const existing = intakeBatches.flatMap((batch) => batch.urls.map((entry) => ({ ...entry, batchId: batch.id })))
       .find((entry) => normalizeHost(entry.siteHost || getUrlHost(entry.url)) === normalizedHost && isAnalysisEntryActive(entry))
@@ -444,7 +444,7 @@ export function PrototypeProvider({ children }) {
         site: siteName,
         siteHost: normalizedHost,
         url,
-        source: kind === 'diagnose' ? '失败队列' : '网站管理',
+        source: source || (kind === 'diagnose' ? '失败队列' : '网站管理'),
         judgment: '识别中',
         confidence: 0,
         ruleId: targetRuleId,
@@ -454,6 +454,7 @@ export function PrototypeProvider({ children }) {
         analysisKind: kind,
         failureId,
         sourceExecutionId,
+        parentAnalysisId,
       }],
     }
     setIntakeBatches((items) => [batch, ...items])
@@ -608,6 +609,7 @@ export function PrototypeProvider({ children }) {
       isBootstrap: false,
       collectionMode,
       collectionType,
+      startedAt: formatTimestamp(),
       readyAt: Date.now() + 1800,
       logs: [`${new Date().toLocaleTimeString('zh-CN', { hour12: false })} ${collectionType}已进入执行队列`],
     }
