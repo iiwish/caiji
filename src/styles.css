@@ -3462,11 +3462,11 @@ select {
 
 .collection-optional-section > summary {
   display: flex;
-  min-height: 66px;
+  min-height: 58px;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 14px 20px;
+  padding: 11px 20px;
   cursor: pointer;
   list-style: none;
 }
@@ -3490,12 +3490,6 @@ select {
   font-weight: 650;
 }
 
-.collection-optional-section > summary > div:first-child > span {
-  margin-top: 4px;
-  color: #8592a6;
-  font-size: 11.5px;
-}
-
 .collection-optional-chevron {
   flex: 0 0 auto;
   color: #98a2b3;
@@ -3516,31 +3510,9 @@ select {
   display: grid;
 }
 
-.collection-auth-toggle-line {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-}
-
-.collection-auth-toggle-line > div:first-child strong,
-.collection-auth-toggle-line > div:first-child span {
-  display: block;
-}
-
-.collection-auth-toggle-line > div:first-child strong {
-  color: #49546a;
-  font-size: 12.5px;
-}
-
-.collection-auth-toggle-line > div:first-child span {
-  margin-top: 3px;
-  color: #98a2b3;
-  font-size: 11.5px;
-}
-
 .collection-mode-grid .mode-card {
-  min-height: 84px;
+  min-height: 64px;
+  align-items: center;
   border-radius: 8px;
 }
 
@@ -3845,7 +3817,6 @@ select {
 
 .collection-auth-heading,
 .collection-auth-title,
-.collection-auth-toggle,
 .collection-auth-method-heading,
 .collection-function-binding {
   display: flex;
@@ -3874,66 +3845,15 @@ select {
   border-radius: 9px;
 }
 
-.collection-auth-title h2,
-.collection-auth-title p {
-  margin: 0;
-}
-
 .collection-auth-title h2 {
+  margin: 0;
   color: #283247;
   font-size: 14px;
   font-weight: 650;
 }
 
-.collection-auth-title p {
-  margin-top: 3px;
-  color: #8592a6;
-  font-size: 11.5px;
-}
-
-.collection-auth-toggle {
-  flex: 0 0 auto;
-  gap: 10px;
-}
-
-.collection-auth-toggle > span {
-  color: #6f7c91;
-  font-size: 12px;
-  font-weight: 550;
-}
-
-.collection-auth-default {
-  display: flex;
-  min-height: 68px;
-  justify-content: center;
-  flex-direction: column;
-  margin-top: 18px;
-  padding: 14px 16px;
-  background: #f8f9fb;
-  border: 1px solid #eceef2;
-  border-radius: 8px;
-}
-
-.collection-auth-default strong,
-.collection-auth-default span {
-  display: block;
-}
-
-.collection-auth-default strong {
-  color: #49546a;
-  font-size: 12.5px;
-  font-weight: 600;
-}
-
-.collection-auth-default span {
-  margin-top: 4px;
-  color: #98a2b3;
-  font-size: 11.5px;
-}
-
 .collection-auth-body {
-  margin-top: 18px;
-  border-top: 1px solid #eceef2;
+  min-width: 0;
 }
 
 .collection-auth-method {
@@ -6735,7 +6655,6 @@ select {
   .collection-basic-grid,
   .collection-basic-grid.existing { grid-template-columns: 1fr; gap: 14px; }
   .collection-basic-field > small { white-space: normal; }
-  .collection-auth-toggle-line { align-items: flex-start; flex-direction: column; gap: 12px; }
   .collection-section-heading {
     align-items: flex-start;
     flex-direction: column;
@@ -6746,14 +6665,6 @@ select {
     flex-direction: column;
     gap: 12px;
   }
-  .collection-auth-title { align-items: flex-start; }
-  .collection-auth-title p { line-height: 1.5; }
-  .collection-auth-toggle {
-    width: 100%;
-    justify-content: flex-end;
-  }
-  .collection-auth-default { margin-top: 14px; }
-  .collection-auth-body { margin-top: 14px; }
   .collection-function-binding { align-items: flex-start; }
   .collection-cron-row .ant-input { width: 100%; }
   .collection-stage-heading { align-items: flex-start; flex-wrap: wrap; }

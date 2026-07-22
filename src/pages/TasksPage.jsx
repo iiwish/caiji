@@ -100,7 +100,6 @@ function createDraft(task, rule) {
     requestInterval: task.requestInterval || 1.5,
     retryCount: task.retryCount ?? 3,
     dedupFields: task.dedupFields || ['url', 'title'],
-    authEnabled: task.authEnabled ?? (customHeadersEnabled || Boolean(authFunctionId)),
     customHeadersEnabled,
     authFunctionId,
     headers,
@@ -128,7 +127,6 @@ function createNewTaskDraft(site, setupMode, sourceSiteFilter = '') {
     requestInterval: 1.5,
     retryCount: 3,
     dedupFields: ['url', 'title'],
-    authEnabled: false,
     customHeadersEnabled: false,
     authFunctionId: '',
     headers: [],
@@ -313,9 +311,10 @@ export function TasksPage() {
     const status = enabled
       ? (selectedRule?.status === '需修复' ? '规则异常' : '启用')
       : draft.isNew ? '草稿' : '已暂停'
-    const configuredHeaders = draft.authEnabled && draft.customHeadersEnabled
+    const configuredHeaders = draft.customHeadersEnabled
       ? draft.headers.filter((header) => header.name.trim() && header.value.trim())
       : []
+    const authEnabled = draft.customHeadersEnabled || Boolean(draft.authFunctionId)
     return {
       name: draft.name.trim(),
       versionPolicy: draft.versionPolicy,
@@ -331,9 +330,9 @@ export function TasksPage() {
       requestInterval: draft.requestInterval,
       retryCount: draft.retryCount,
       dedupFields: draft.dedupFields,
-      authEnabled: draft.authEnabled,
-      customHeadersEnabled: draft.authEnabled && draft.customHeadersEnabled,
-      authFunctionId: draft.authEnabled ? draft.authFunctionId : '',
+      authEnabled,
+      customHeadersEnabled: draft.customHeadersEnabled,
+      authFunctionId: draft.authFunctionId,
       headers: configuredHeaders,
       status,
     }
@@ -345,8 +344,8 @@ export function TasksPage() {
       message.warning('请输入采集计划名称')
       return null
     }
-    if (draft.authEnabled && !patch.headers.length && !patch.authFunctionId) {
-      message.warning('请选择自定义 Header 或绑定 Python 鉴权函数，也可以关闭自定义鉴权')
+    if (draft.customHeadersEnabled && !patch.headers.length) {
+      message.warning('请填写至少一组完整的自定义 Header，或关闭该选项')
       return null
     }
     if (!selectedTask) return null
@@ -375,8 +374,8 @@ export function TasksPage() {
       message.warning('请选择已经发布采集规则的网站')
       return
     }
-    if (draft.authEnabled && !patch.headers.length && !patch.authFunctionId) {
-      message.warning('请选择自定义 Header 或绑定 Python 鉴权函数，也可以关闭自定义鉴权')
+    if (draft.customHeadersEnabled && !patch.headers.length) {
+      message.warning('请填写至少一组完整的自定义 Header，或关闭该选项')
       return
     }
     const taskId = createTask({
@@ -557,11 +556,11 @@ export function TasksPage() {
           <div className="mode-grid collection-mode-grid">
             <button type="button" className={`mode-card ${draft.collectionMode === '全量' ? 'active' : ''}`} onClick={() => updateDraft({ collectionMode: '全量' })}>
               <span className="radio-dot" />
-              <span><strong>全量采集</strong><p>抓取数据源的全部历史公告，适用于首次接入或数据重建</p></span>
+              <span><strong>全量采集</strong></span>
             </button>
             <button type="button" className={`mode-card ${draft.collectionMode === '增量' ? 'active' : ''}`} onClick={() => updateDraft({ collectionMode: '增量' })}>
               <span className="radio-dot" />
-              <span><strong>定时增量</strong><p>按调度周期只抓取新增公告，自动去重，适合日常运行</p></span>
+              <span><strong>定时增量</strong></span>
             </button>
           </div>
         </section>
@@ -587,7 +586,7 @@ export function TasksPage() {
 
         <details className="collection-config-surface collection-optional-section">
           <summary>
-            <div><strong>高级参数</strong><span>并发、请求间隔、去重和失败重试</span></div>
+            <div><strong>高级参数</strong></div>
             <DownOutlined className="collection-optional-chevron" />
           </summary>
           <div className="collection-config-section collection-optional-body"><div className="collection-advanced-grid">
@@ -614,75 +613,60 @@ export function TasksPage() {
           <summary>
             <div className="collection-auth-title">
               <span><SafetyCertificateOutlined /></span>
-              <div><h2>鉴权与请求增强</h2><p>按需附加 Header 或执行 Python 鉴权函数</p></div>
+              <div><h2>鉴权与请求增强</h2></div>
             </div>
             <DownOutlined className="collection-optional-chevron" />
           </summary>
           <div className="collection-config-section collection-auth-section collection-optional-body">
-            <div className="collection-auth-toggle-line">
-              <div><strong>自定义鉴权</strong><span>默认使用平台请求配置</span></div>
-              <div className="collection-auth-toggle">
-                <span>{draft.authEnabled ? '已启用' : '无需鉴权'}</span>
-                <Switch aria-label="启用自定义鉴权" checked={draft.authEnabled} onChange={(authEnabled) => updateDraft({ authEnabled })} />
+            <div className="collection-auth-body">
+              <div className="collection-auth-method collection-header-method">
+                <div className="collection-auth-method-heading">
+                  <div><strong>自定义 Header</strong></div>
+                  <Switch aria-label="启用自定义 Header" size="small" checked={draft.customHeadersEnabled} onChange={toggleCustomHeaders} />
+                </div>
+                {draft.customHeadersEnabled && (
+                  <>
+                    <div className="collection-header-list">
+                      {draft.headers.map((header, index) => (
+                        <div className="collection-header-row" key={index}>
+                          <Input className="mono" aria-label={`请求头 ${index + 1} 名称`} placeholder="Header 名称" value={header.name} onChange={(event) => updateRequestHeader(index, { name: event.target.value })} />
+                          <Input className="mono" aria-label={`请求头 ${index + 1} 值`} placeholder="值" value={header.value} onChange={(event) => updateRequestHeader(index, { value: event.target.value })} />
+                          <Tooltip title="删除请求头"><Button aria-label={`删除请求头 ${index + 1}`} icon={<DeleteOutlined />} onClick={() => removeRequestHeader(index)} /></Tooltip>
+                        </div>
+                      ))}
+                    </div>
+                    <Button className="collection-add-header" type="dashed" icon={<PlusOutlined />} onClick={addRequestHeader}>添加 Header</Button>
+                  </>
+                )}
+              </div>
+
+              <div className="collection-auth-method collection-function-method">
+                <div className="collection-auth-method-heading">
+                  <div><strong>Python 鉴权函数</strong></div>
+                </div>
+                <Select
+                  className="collection-function-select"
+                  allowClear
+                  showSearch
+                  optionFilterProp="label"
+                  aria-label="绑定 Python 鉴权函数"
+                  placeholder="不使用鉴权函数"
+                  value={draft.authFunctionId || undefined}
+                  onChange={(authFunctionId) => updateDraft({ authFunctionId: authFunctionId || '' })}
+                  options={AUTH_FUNCTIONS.map((item) => ({ value: item.value, label: `${item.label} · ${item.module}` }))}
+                />
+                {boundAuthFunction && (
+                  <div className="collection-function-binding">
+                    <CodeOutlined />
+                    <div>
+                      <strong>{boundAuthFunction.module}</strong>
+                      <span className="mono">{boundAuthFunction.signature}</span>
+                    </div>
+                    <Tag>Python</Tag>
+                  </div>
+                )}
               </div>
             </div>
-
-            {!draft.authEnabled ? (
-              <div className="collection-auth-default">
-                <strong>使用平台默认请求配置</strong>
-                <span>不附加自定义 Header，不执行鉴权函数</span>
-              </div>
-            ) : (
-              <div className="collection-auth-body">
-                <div className="collection-auth-method collection-header-method">
-                  <div className="collection-auth-method-heading">
-                    <div><strong>自定义 Header</strong><span>可选</span></div>
-                    <Switch aria-label="启用自定义 Header" size="small" checked={draft.customHeadersEnabled} onChange={toggleCustomHeaders} />
-                  </div>
-                  {draft.customHeadersEnabled && (
-                    <>
-                      <div className="collection-header-list">
-                        {draft.headers.map((header, index) => (
-                          <div className="collection-header-row" key={index}>
-                            <Input className="mono" aria-label={`请求头 ${index + 1} 名称`} placeholder="Header 名称" value={header.name} onChange={(event) => updateRequestHeader(index, { name: event.target.value })} />
-                            <Input className="mono" aria-label={`请求头 ${index + 1} 值`} placeholder="值" value={header.value} onChange={(event) => updateRequestHeader(index, { value: event.target.value })} />
-                            <Tooltip title="删除请求头"><Button aria-label={`删除请求头 ${index + 1}`} icon={<DeleteOutlined />} onClick={() => removeRequestHeader(index)} /></Tooltip>
-                          </div>
-                        ))}
-                      </div>
-                      <Button className="collection-add-header" type="dashed" icon={<PlusOutlined />} onClick={addRequestHeader}>添加 Header</Button>
-                    </>
-                  )}
-                </div>
-
-                <div className="collection-auth-method collection-function-method">
-                  <div className="collection-auth-method-heading">
-                    <div><strong>绑定函数库</strong><span>可选 · Python</span></div>
-                  </div>
-                  <Select
-                    className="collection-function-select"
-                    allowClear
-                    showSearch
-                    optionFilterProp="label"
-                    aria-label="绑定 Python 鉴权函数"
-                    placeholder="不绑定函数"
-                    value={draft.authFunctionId || undefined}
-                    onChange={(authFunctionId) => updateDraft({ authFunctionId: authFunctionId || '' })}
-                    options={AUTH_FUNCTIONS.map((item) => ({ value: item.value, label: `${item.label} · ${item.module}` }))}
-                  />
-                  {boundAuthFunction && (
-                    <div className="collection-function-binding">
-                      <CodeOutlined />
-                      <div>
-                        <strong>{boundAuthFunction.module}</strong>
-                        <span className="mono">{boundAuthFunction.signature}</span>
-                      </div>
-                      <Tag>Python</Tag>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
           </div>
         </details>
 
