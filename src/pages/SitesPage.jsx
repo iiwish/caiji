@@ -17,6 +17,7 @@ import {
   CheckOutlined,
   ClockCircleOutlined,
   CodeOutlined,
+  HistoryOutlined,
   InfoCircleOutlined,
   LineChartOutlined,
   RobotOutlined,
@@ -69,6 +70,15 @@ export function SitesPage() {
   const activeAnalyses = useMemo(() => intakeBatches
     .flatMap((batch) => batch.urls.map((entry) => ({ ...entry, batchId: batch.id })))
     .filter(isActiveAnalysis), [intakeBatches])
+
+  const analysisHistoryCounts = useMemo(() => {
+    const counts = new Map()
+    intakeBatches.flatMap((batch) => batch.urls).filter((entry) => !isActiveAnalysis(entry)).forEach((entry) => {
+      const host = normalizeHost(entry.siteHost || getUrlHost(entry.url))
+      counts.set(host, (counts.get(host) || 0) + 1)
+    })
+    return counts
+  }, [intakeBatches])
 
   const analysisByHost = useMemo(() => {
     const entries = new Map()
@@ -346,7 +356,7 @@ export function SitesPage() {
         open={Boolean(selected)}
         onCancel={closeSite}
         width={760}
-        footer={<Space><Button onClick={closeSite}>关闭</Button><Button icon={<CodeOutlined />} onClick={() => navigate(getSiteRulePath(selected?.host || ''))}>网站规则</Button><Button type="primary" onClick={() => {
+        footer={<Space><Button onClick={closeSite}>关闭</Button>{analysisHistoryCounts.get(selected?.host) > 0 && <Button icon={<HistoryOutlined />} onClick={() => navigate(`/ai/history?site=${encodeURIComponent(selected?.host || '')}`)}>分析记录 {analysisHistoryCounts.get(selected?.host)}</Button>}<Button icon={<CodeOutlined />} onClick={() => navigate(getSiteRulePath(selected?.host || ''))}>网站规则</Button><Button type="primary" onClick={() => {
           if (selected?.analysisEntry || ['待分析', '分析中', '待审核'].includes(selected?.status)) openAnalysis(selected)
           else navigate(selectedTask ? `/tasks?site=${encodeURIComponent(selected?.host || '')}` : `/tasks?site=${encodeURIComponent(selected?.host || '')}&create=1`)
         }}>{selected?.analysisEntry ? '查看分析' : ['待分析', '分析中', '待审核'].includes(selected?.status) ? '发起 AI 分析' : selectedTask ? '查看采集计划' : '创建采集计划'}</Button></Space>}

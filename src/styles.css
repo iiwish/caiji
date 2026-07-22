@@ -1543,18 +1543,131 @@ select {
   flex: 0 0 auto;
 }
 
-.ai-queue-scope {
-  padding: 10px 12px 0;
+.ai-queue-actions,
+.ai-history-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
-.ai-queue-scope .ant-segmented {
-  width: 100%;
+.ai-queue-actions .ant-btn-icon-only {
+  width: 28px;
 }
 
 .ai-analysis-queue-list {
   max-height: calc(100vh - 264px);
   padding: 12px;
   overflow-y: auto;
+}
+
+.ai-queue-group + .ai-queue-group {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #f0f1f4;
+}
+
+.ai-queue-group-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0 2px 8px;
+  color: #8592a6;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.ai-queue-group-label b {
+  font-weight: 600;
+}
+
+.ai-history-page {
+  display: grid;
+  gap: 10px;
+}
+
+.ai-history-back,
+.ai-history-detail-nav .ant-btn {
+  justify-self: start;
+  padding-inline: 0;
+  color: #536078;
+}
+
+.ai-history-surface {
+  overflow: hidden;
+}
+
+.ai-history-header {
+  display: flex;
+  min-height: 66px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #f0f1f4;
+}
+
+.ai-history-header > div:first-child {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.ai-history-header h2 {
+  margin: 0;
+  color: #1a2233;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.ai-history-header span {
+  color: #8592a6;
+  font-size: 12px;
+}
+
+.ai-history-actions .ant-select {
+  width: 132px;
+}
+
+.ai-history-table .ant-table-tbody > tr > td {
+  height: 64px;
+}
+
+.ai-history-time {
+  color: #667085;
+  font-size: 11px;
+}
+
+.ai-history-version {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ai-history-version strong {
+  color: #344054;
+  font-size: 12px;
+}
+
+.ai-history-version span {
+  color: #98a2b3;
+  font-size: 10.5px;
+}
+
+.ai-history-detail-layout {
+  display: grid;
+  gap: 10px;
+}
+
+.ai-history-detail-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ai-history-detail-nav > span {
+  color: #98a2b3;
+  font-size: 11px;
 }
 
 .ai-create-mode {
@@ -6092,8 +6205,16 @@ select {
     overflow-x: auto;
     overflow-y: hidden;
   }
+  .ai-queue-group { flex: 0 0 240px; }
+  .ai-queue-group + .ai-queue-group {
+    margin-top: 0;
+    padding-top: 0;
+    padding-left: 12px;
+    border-top: 0;
+    border-left: 1px solid #f0f1f4;
+  }
   .ai-analysis-item {
-    flex: 0 0 240px;
+    width: 100%;
     margin-bottom: 0;
   }
   .detail-titlebar,
@@ -6105,6 +6226,15 @@ select {
 }
 
 @media (max-width: 560px) {
+  .ai-history-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .ai-history-actions { width: 100%; }
+  .ai-history-actions .ant-select {
+    flex: 1 1 auto;
+    width: auto;
+  }
   .model-list-toolbar { align-items: stretch; flex-direction: column; }
   .model-list-toolbar .ant-select { width: 100%; }
   .model-selection-field.inline { grid-template-columns: 1fr; gap: 8px; }

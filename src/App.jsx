@@ -30,6 +30,7 @@ export default function App() {
             <Route index element={<Navigate to="/dashboard" replace />} />
             <Route path="dashboard" element={<DashboardPage />} />
             <Route path="ai" element={<AiAnalysisPage />} />
+            <Route path="ai/history" element={<AiAnalysisPage />} />
             <Route path="sites" element={<SitesPage />} />
             <Route path="sites/:siteHost/rule" element={<SiteRulePage />} />
             <Route path="rules" element={<Navigate to="/sites" replace />} />

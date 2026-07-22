@@ -42,6 +42,12 @@ function getWorkspace(pathname) {
 
 function getFocusedWorkspaceMeta(location) {
   const segments = location.pathname.split('/').filter(Boolean)
+  if (segments[0] === 'ai' && segments[1] === 'history') {
+    const params = new URLSearchParams(location.search)
+    return params.has('entry')
+      ? ['历史分析详情', '查看已归档的分析结果与发布配置', '']
+      : ['历史分析记录', '查询已完成的分析、规则版本和来源链路', '搜索历史记录、网站或 URL…']
+  }
   if (segments[0] === 'sites' && segments[2] === 'rule') {
     return ['网站规则', '维护采集规则、回归结果和发布版本']
   }
@@ -180,7 +186,7 @@ export function AppShell() {
         </Header>
         <Content className="main-content">
           <div className="content-inner">
-            {!['dashboard', 'manual'].includes(workspace) && !focusedMeta && (
+            {!['dashboard', 'manual'].includes(workspace) && (!focusedMeta || meta[2]) && (
               <SearchBar inputRef={searchRef} placeholder={meta[2]} value={search} onChange={setSearch} />
             )}
             <Outlet context={{ search }} />
