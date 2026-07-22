@@ -58,10 +58,10 @@ export const initialRules = [
 ]
 
 export const initialTasks = [
-  { id: 'TK-001', name: '中国政府采购日常增量', site: '中国政府采购网', ruleId: 'RP-0001', ruleVersion: 'v1.4.0', versionPolicy: '跟随最新发布', scope: '增量', executionMode: '定时', frequency: '每 30 分钟', cron: '*/30 * * * *', nextRun: '16:10', status: '启用', concurrency: 4 },
-  { id: 'TK-002', name: '湖北公共资源增量', site: '湖北省公共资源交易中心', ruleId: 'RP-0002', ruleVersion: 'v1.1.0', versionPolicy: '固定当前版本', scope: '增量', executionMode: '定时', frequency: '每 1 小时', cron: '0 * * * *', nextRun: '16:30', status: '启用', concurrency: 3 },
-  { id: 'TK-003', name: '全国公共资源历史回补', site: '全国公共资源交易平台', ruleId: 'RP-0001', ruleVersion: 'v1.4.0', versionPolicy: '固定当前版本', scope: '全量', executionMode: '单次', frequency: '单次执行', cron: '', nextRun: '待执行', status: '已暂停', concurrency: 6 },
-  { id: 'TK-004', name: '广东监管公告增量', site: '广东省招标投标监管网', ruleId: 'RP-0003', ruleVersion: 'v2.0.1', versionPolicy: '跟随最新发布', scope: '增量', executionMode: '定时', frequency: '每 2 小时', cron: '0 */2 * * *', nextRun: '-', status: '规则异常', concurrency: 2 },
+  { id: 'TK-001', name: '中国政府采购日常增量', site: '中国政府采购网', ruleId: 'RP-0001', ruleVersion: 'v1.4.0', versionPolicy: '跟随最新发布', collectionMode: '增量', initialScope: '全量', bootstrapStatus: '已完成', continuousEnabled: true, scope: '增量', executionMode: '定时', frequency: '每 30 分钟', cron: '*/30 * * * *', nextRun: '16:10', status: '启用', concurrency: 4 },
+  { id: 'TK-002', name: '湖北公共资源增量', site: '湖北省公共资源交易中心', ruleId: 'RP-0002', ruleVersion: 'v1.1.0', versionPolicy: '固定当前版本', collectionMode: '增量', initialScope: '全量', bootstrapStatus: '已完成', continuousEnabled: true, scope: '增量', executionMode: '定时', frequency: '每 1 小时', cron: '0 * * * *', nextRun: '16:30', status: '启用', concurrency: 3 },
+  { id: 'TK-003', name: '全国公共资源历史回补', site: '全国公共资源交易平台', ruleId: 'RP-0001', ruleVersion: 'v1.4.0', versionPolicy: '固定当前版本', collectionMode: '全量', initialScope: '全量', bootstrapStatus: '进行中', continuousEnabled: true, scope: '全量', executionMode: '定时', frequency: '每天', cron: '0 3 * * *', nextRun: '待执行', status: '已暂停', concurrency: 6 },
+  { id: 'TK-004', name: '广东监管公告增量', site: '广东省招标投标监管网', ruleId: 'RP-0003', ruleVersion: 'v2.0.1', versionPolicy: '跟随最新发布', collectionMode: '增量', initialScope: '全量', bootstrapStatus: '已完成', continuousEnabled: true, scope: '增量', executionMode: '定时', frequency: '每 2 小时', cron: '0 */2 * * *', nextRun: '-', status: '规则异常', concurrency: 2 },
 ]
 
 export const initialUsers = [
@@ -71,11 +71,11 @@ export const initialUsers = [
 ]
 
 export const initialExecutions = [
-  { id: 'EX-1487', taskId: 'TK-001', task: '中国政府采购日常增量', site: '中国政府采购网', url: 'https://www.ccgp.gov.cn/cggg/zygg/', ruleId: 'RP-0001', ruleVersion: 'v1.4.0', status: '成功', discovered: 3320, articles: 3204, finishedAt: '07-16 15:40', duration: '2m18s', issue: '', stage: '', retryOf: '', logs: ['15:37:42 任务开始', '15:37:45 列表发现 3,320 条', '15:39:56 正文入库 3,204 条', '15:40:00 质量检查通过'] },
-  { id: 'EX-1486', taskId: 'TK-002', task: '湖北公共资源增量', site: '湖北省公共资源交易中心', url: 'https://ggzy.hubei.gov.cn/notice/list', ruleId: 'RP-0002', ruleVersion: 'v1.1.0', status: '成功', discovered: 1904, articles: 1860, finishedAt: '07-16 15:30', duration: '1m52s', issue: '', stage: '', retryOf: '', logs: ['15:28:08 任务开始', '15:28:12 列表发现 1,904 条', '15:30:00 入库完成'] },
-  { id: 'EX-1485', taskId: 'TK-003', task: '全国公共资源历史回补', site: '全国公共资源交易平台', url: 'https://ggzy.gov.cn/', ruleId: 'RP-0001', ruleVersion: 'v1.4.0', status: '运行中', discovered: 13022, articles: 12480, finishedAt: '-', duration: '14m06s', issue: '', stage: '', retryOf: '', logs: ['15:10:00 任务开始', '15:23:40 已处理 13,022 个详情页', '15:24:06 正在执行质量检查'] },
-  { id: 'EX-1484', taskId: 'TK-004', task: '广东监管公告增量', site: '广东省招标投标监管网', url: 'https://gdzbtb.gov.cn/notice/list', ruleId: 'RP-0003', ruleVersion: 'v2.0.1', status: '失败', discovered: 0, articles: 0, finishedAt: '07-16 14:50', duration: '0m12s', issue: '页面结构变化，列表定位失败', stage: '列表发现', retryOf: '', logs: ['14:50:00 任务开始', '14:50:09 GET /notice/list 200', '14:50:12 选择器 div.m_list div.item 匹配 0 个节点', '14:50:12 执行失败 PARSE_EMPTY'] },
-  { id: 'EX-1483', taskId: 'TK-001', task: '中国政府采购日常增量', site: '中国政府采购网', url: 'https://www.ccgp.gov.cn/cggg/zygg/', ruleId: 'RP-0001', ruleVersion: 'v1.4.0', status: '部分失败', discovered: 690, articles: 642, finishedAt: '07-16 15:00', duration: '0m48s', issue: '48 个详情页请求超时', stage: '明细抓取', retryOf: '', logs: ['14:59:12 任务开始', '14:59:26 列表发现 690 条', '15:00:00 48 个详情页请求超时'] },
+  { id: 'EX-1487', taskId: 'TK-001', task: '中国政府采购日常增量', site: '中国政府采购网', url: 'https://www.ccgp.gov.cn/cggg/zygg/', ruleId: 'RP-0001', ruleVersion: 'v1.4.0', status: '成功', discovered: 3320, articles: 3204, finishedAt: '07-16 15:40', duration: '2m18s', issue: '', stage: '', retryOf: '', logs: ['15:37:42 执行开始', '15:37:45 列表发现 3,320 条', '15:39:56 正文入库 3,204 条', '15:40:00 质量检查通过'] },
+  { id: 'EX-1486', taskId: 'TK-002', task: '湖北公共资源增量', site: '湖北省公共资源交易中心', url: 'https://ggzy.hubei.gov.cn/notice/list', ruleId: 'RP-0002', ruleVersion: 'v1.1.0', status: '成功', discovered: 1904, articles: 1860, finishedAt: '07-16 15:30', duration: '1m52s', issue: '', stage: '', retryOf: '', logs: ['15:28:08 执行开始', '15:28:12 列表发现 1,904 条', '15:30:00 入库完成'] },
+  { id: 'EX-1485', taskId: 'TK-003', task: '全国公共资源历史回补', site: '全国公共资源交易平台', url: 'https://ggzy.gov.cn/', ruleId: 'RP-0001', ruleVersion: 'v1.4.0', status: '运行中', discovered: 13022, articles: 12480, finishedAt: '-', duration: '14m06s', issue: '', stage: '', retryOf: '', logs: ['15:10:00 执行开始', '15:23:40 已处理 13,022 个详情页', '15:24:06 正在执行质量检查'] },
+  { id: 'EX-1484', taskId: 'TK-004', task: '广东监管公告增量', site: '广东省招标投标监管网', url: 'https://gdzbtb.gov.cn/notice/list', ruleId: 'RP-0003', ruleVersion: 'v2.0.1', status: '失败', discovered: 0, articles: 0, finishedAt: '07-16 14:50', duration: '0m12s', issue: '页面结构变化，列表定位失败', stage: '列表发现', retryOf: '', logs: ['14:50:00 执行开始', '14:50:09 GET /notice/list 200', '14:50:12 选择器 div.m_list div.item 匹配 0 个节点', '14:50:12 执行失败 PARSE_EMPTY'] },
+  { id: 'EX-1483', taskId: 'TK-001', task: '中国政府采购日常增量', site: '中国政府采购网', url: 'https://www.ccgp.gov.cn/cggg/zygg/', ruleId: 'RP-0001', ruleVersion: 'v1.4.0', status: '部分失败', discovered: 690, articles: 642, finishedAt: '07-16 15:00', duration: '0m48s', issue: '48 个详情页请求超时', stage: '明细抓取', retryOf: '', logs: ['14:59:12 执行开始', '14:59:26 列表发现 690 条', '15:00:00 48 个详情页请求超时'] },
 ]
 
 export const initialArticles = [
@@ -83,7 +83,7 @@ export const initialArticles = [
   { id: 'AR-3203', title: '政务云平台三期扩容建设项目竞争性磋商公告', site: '中国政府采购网', publishTime: '2026-07-16', collectedAt: '07-16 15:39', quality: '通过', executionId: 'EX-1487', ruleId: 'RP-0001', url: 'https://www.ccgp.gov.cn/cggg/zygg/202607/t20260716_3203.htm', content: '政务云平台三期扩容建设项目已具备采购条件，现采用竞争性磋商方式选择供应商。' },
   { id: 'AR-1860', title: '城市道路养护工程施工招标公告', site: '湖北省公共资源交易中心', publishTime: '2026-07-16', collectedAt: '07-16 15:29', quality: '通过', executionId: 'EX-1486', ruleId: 'RP-0002', url: 'https://ggzy.hubei.gov.cn/notice/1860', content: '城市道路养护工程施工项目现公开招标，建设内容包括道路修复、排水设施维护和交通组织优化。' },
   { id: 'AR-1859', title: '省属高校实验设备定点采购项目询价公告', site: '湖北省公共资源交易中心', publishTime: '2026-07-15', collectedAt: '07-16 15:29', quality: '内容噪声', executionId: 'EX-1486', ruleId: 'RP-0002', url: 'https://ggzy.hubei.gov.cn/notice/1859', content: '首页 > 采购公告 > 当前位置。省属高校实验设备定点采购项目现进行询价采购。版权所有，技术支持。' },
-  { id: 'AR-12480', title: '智慧交通信号控制系统升级改造项目招标', site: '全国公共资源交易平台', publishTime: '2026-07-14', collectedAt: '07-16 15:23', quality: '重复待确认', executionId: 'EX-1485', ruleId: 'RP-0001', url: 'https://ggzy.gov.cn/project/12480', content: '智慧交通信号控制系统升级改造项目已批准建设，现对系统设备和集成服务进行公开招标。' },
+  { id: 'AR-12480', title: '智慧交通信号控制系统升级改造项目招标', site: '全国公共资源交易平台', publishTime: '2026-07-14', collectedAt: '07-16 15:23', quality: '重复待确认', executionId: 'EX-1485', ruleId: 'RP-0001', url: 'https://ggzy.gov.cn/project/12480', rawType: 'json', content: '智慧交通信号控制系统升级改造项目已批准建设，现对系统设备和集成服务进行公开招标。' },
 ]
 
 export const initialIntakeBatches = [

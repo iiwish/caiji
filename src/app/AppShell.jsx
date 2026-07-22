@@ -3,6 +3,7 @@ import { Avatar, Badge, Button, Dropdown, Layout, Menu, Tag, Tooltip } from 'ant
 import {
   AppstoreOutlined,
   BellOutlined,
+  BookOutlined,
   CodeOutlined,
   DatabaseOutlined,
   FileSearchOutlined,
@@ -24,18 +25,38 @@ const { Header, Content, Sider } = Layout
 
 const pageMeta = {
   dashboard: ['采集仪表盘', '实时监控全平台采集运行状况', '搜索批次、数据源…'],
-  ai: ['AI 分析', '自动解析目标网站，生成并校验采集配置', '搜索分析队列中的数据源…'],
-  sites: ['网站管理', '按 URL 管理访问方式、采集规则和数据资产状态', '搜索网站名称、URL…'],
-  tasks: ['采集任务', '管理采集范围、调度计划和运行参数', '搜索任务名称、网站或任务 ID…'],
-  executions: ['采集记录', '查看每次生产执行的事实、问题和产物', '搜索执行编码、任务、网站或 URL…'],
+  ai: ['AI 分析队列', '处理活动分析任务，生成并校验采集配置', '搜索分析任务、网站或 URL…'],
+  sites: ['网站管理', '管理全部导入网站及其接入状态', '搜索网站名称、URL…'],
+  tasks: ['采集管理', '管理采集计划、调度策略和运行参数', '搜索采集计划、网站或计划 ID…'],
+  executions: ['采集记录', '查看每次生产执行的事实、问题和产物', '搜索批次 ID、采集计划、网站或 URL…'],
   failures: ['失败队列', '排查采集失败的页面与错误原因', '搜索失败页面、错误码…'],
   articles: ['原文库', '查看入库原文、质量状态和来源追溯', '搜索标题、原文编码、URL 或网站…'],
   capabilities: ['Skill 能力', '管理跨网站复用的生成与修复策略', '搜索能力名称或版本…'],
+  manual: ['操作手册', '查看故障修复与网站接入的完整操作链路', ''],
   settings: ['设置', '管理用户、模型、通知和审计记录', '搜索设置或审计事件…'],
 }
 
 function getWorkspace(pathname) {
   return pathname.split('/').filter(Boolean)[0] || 'dashboard'
+}
+
+function getFocusedWorkspaceMeta(location) {
+  const segments = location.pathname.split('/').filter(Boolean)
+  if (segments[0] === 'sites' && segments[2] === 'rule') {
+    return ['网站规则', '维护采集规则、回归结果和发布版本']
+  }
+  if (segments[0] === 'capabilities' && segments[1]) {
+    return ['Skill 能力维护', '编辑能力文档、运行回归并发布候选版本']
+  }
+  if (segments[0] === 'articles' && segments[1]) {
+    return ['原文详情', '核查正文、质量状态和来源链路']
+  }
+  if (segments[0] === 'tasks') {
+    const params = new URLSearchParams(location.search)
+    if (params.get('create') === '1') return ['新建采集计划', '完成基本信息和运行参数后再启用计划']
+    if (params.has('task')) return ['采集配置', '维护采集策略、调度参数和访问配置']
+  }
+  return null
 }
 
 export function AppShell() {
@@ -46,13 +67,17 @@ export function AppShell() {
   const [search, setSearch] = useState('')
   const searchRef = useRef(null)
   const workspace = getWorkspace(location.pathname)
-  const meta = pageMeta[workspace] || pageMeta.dashboard
+  const focusedMeta = getFocusedWorkspaceMeta(location)
+  const meta = focusedMeta || pageMeta[workspace] || pageMeta.dashboard
   const failureCount = 37
-  const intakeNeedsHandling = intakeBatches.filter((item) => item.status === '需处理').length
+  const activeAnalysisEntries = intakeBatches
+    .flatMap((batch) => batch.urls)
+    .filter((entry) => !['审核完成', '已通过', '已完成', '已取消'].includes(entry.status))
+  const intakeNeedsHandling = activeAnalysisEntries.filter((entry) => entry.status !== '分析中').length
 
   useEffect(() => {
     setSearch('')
-  }, [location.pathname])
+  }, [location.pathname, location.search])
 
   useEffect(() => {
     if (workspace === 'dashboard') return undefined
@@ -76,26 +101,25 @@ export function AppShell() {
 
   const navItems = useMemo(() => [
     { type: 'group', label: '总览', children: [{ key: 'dashboard', icon: <AppstoreOutlined />, label: '监控大盘', title: '监控大盘', 'aria-label': '监控大盘' }] },
-    { type: 'group', label: '接入与资产', children: [
-      { key: 'ai', icon: <FileSearchOutlined />, label: <span className="nav-label">AI 分析<Badge count={intakeNeedsHandling} /></span>, title: 'AI 分析', 'aria-label': 'AI 分析' },
+    { type: 'group', label: '数据接入', children: [
       { key: 'sites', icon: <GlobalOutlined />, label: '网站管理', title: '网站管理', 'aria-label': '网站管理' },
+      { key: 'ai', icon: <FileSearchOutlined />, label: <span className="nav-label">AI 分析队列<Badge count={intakeNeedsHandling} /></span>, title: 'AI 分析队列', 'aria-label': 'AI 分析队列' },
+      { key: 'tasks', icon: <ScheduleOutlined />, label: '采集管理', title: '采集管理', 'aria-label': '采集管理' },
     ] },
-    { type: 'group', label: '生产', children: [
-      { key: 'tasks', icon: <ScheduleOutlined />, label: '采集任务', title: '采集任务', 'aria-label': '采集任务' },
+    { type: 'group', label: '运行管理', children: [
       { key: 'executions', icon: <HistoryOutlined />, label: '采集记录', title: '采集记录', 'aria-label': '采集记录' },
       { key: 'failures', icon: <WarningOutlined />, label: <span className="nav-label">失败队列<Badge count={failureCount} /></span>, title: '失败队列', 'aria-label': '失败队列' },
       { key: 'articles', icon: <ReadOutlined />, label: '原文库', title: '原文库', 'aria-label': '原文库' },
     ] },
     { type: 'group', label: '治理', children: [
       { key: 'capabilities', icon: <CodeOutlined />, label: 'Skill 能力', title: 'Skill 能力', 'aria-label': 'Skill 能力' },
-      { key: 'settings', icon: <SettingOutlined />, label: '设置', title: '设置', 'aria-label': '设置' },
     ] },
   ], [intakeNeedsHandling])
 
   const notificationMenu = {
     items: [
       { key: 'failure', label: `${failureCount} 个失败页面需要处理`, onClick: () => navigate('/failures') },
-      { key: 'review', label: `${intakeNeedsHandling} 个 AI 批次需要处理`, onClick: () => navigate('/ai') },
+      { key: 'review', label: `AI 分析队列中有 ${intakeNeedsHandling} 个任务需要处理`, onClick: () => navigate('/ai') },
       { key: 'read', label: '全部标记为已读', onClick: () => setNotificationCount(0) },
     ],
   }
@@ -115,10 +139,27 @@ export function AppShell() {
           items={navItems}
           onClick={({ key }) => navigate(`/${key}`)}
         />
-        <button className={`user-panel ${collapsed ? 'collapsed' : ''}`} onClick={() => navigate('/settings')}>
-          <Avatar shape="square">DZ</Avatar>
-          {!collapsed && <><div><strong>qidev_qi</strong><span>工程师 · 管理员</span></div><SettingOutlined /></>}
-        </button>
+        <div className={`sidebar-utility ${collapsed ? 'collapsed' : ''}`}>
+          <Tooltip title={collapsed ? '操作手册' : ''} placement="right">
+            <Button
+              type="text"
+              className={`sidebar-utility-button ${workspace === 'manual' ? 'active' : ''}`}
+              aria-label="操作手册"
+              aria-current={workspace === 'manual' ? 'page' : undefined}
+              icon={<BookOutlined />}
+              onClick={() => navigate('/manual')}
+            >
+              {!collapsed && <span>操作手册</span>}
+            </Button>
+          </Tooltip>
+        </div>
+        <div className={`user-panel ${collapsed ? 'collapsed' : ''}`}>
+          {!collapsed && <Avatar shape="square">DZ</Avatar>}
+          {!collapsed && <div className="user-copy"><strong>qidev_qi</strong><span>工程师 · 管理员</span></div>}
+          <Tooltip title="设置" placement="right">
+            <Button className="user-settings-button" type="text" aria-label="打开设置" icon={<SettingOutlined />} onClick={() => navigate('/settings')} />
+          </Tooltip>
+        </div>
       </Sider>
 
       <Layout className="main-layout">
@@ -139,7 +180,7 @@ export function AppShell() {
         </Header>
         <Content className="main-content">
           <div className="content-inner">
-            {workspace !== 'dashboard' && (
+            {!['dashboard', 'manual'].includes(workspace) && !focusedMeta && (
               <SearchBar inputRef={searchRef} placeholder={meta[2]} value={search} onChange={setSearch} />
             )}
             <Outlet context={{ search }} />

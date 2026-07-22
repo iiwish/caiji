@@ -7,11 +7,13 @@ import { PrototypeProvider } from './app/PrototypeContext'
 const DashboardPage = lazy(() => import('./pages/DashboardPage').then((module) => ({ default: module.DashboardPage })))
 const AiAnalysisPage = lazy(() => import('./pages/AiAnalysisPage').then((module) => ({ default: module.AiAnalysisPage })))
 const SitesPage = lazy(() => import('./pages/SitesPage').then((module) => ({ default: module.SitesPage })))
+const SiteRulePage = lazy(() => import('./pages/SiteRulePage').then((module) => ({ default: module.SiteRulePage })))
 const TasksPage = lazy(() => import('./pages/TasksPage').then((module) => ({ default: module.TasksPage })))
 const ExecutionsPage = lazy(() => import('./pages/ExecutionsPage').then((module) => ({ default: module.ExecutionsPage })))
 const FailuresPage = lazy(() => import('./pages/FailuresPage').then((module) => ({ default: module.FailuresPage })))
 const ArticlesPage = lazy(() => import('./pages/ArticlesPage').then((module) => ({ default: module.ArticlesPage })))
 const CapabilitiesPage = lazy(() => import('./pages/CapabilitiesPage').then((module) => ({ default: module.CapabilitiesPage })))
+const ManualPage = lazy(() => import('./pages/ManualPage').then((module) => ({ default: module.ManualPage })))
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then((module) => ({ default: module.SettingsPage })))
 
 function LoadingPage() {
@@ -29,6 +31,7 @@ export default function App() {
             <Route path="dashboard" element={<DashboardPage />} />
             <Route path="ai" element={<AiAnalysisPage />} />
             <Route path="sites" element={<SitesPage />} />
+            <Route path="sites/:siteHost/rule" element={<SiteRulePage />} />
             <Route path="rules" element={<Navigate to="/sites" replace />} />
             <Route path="rules/:ruleId" element={<Navigate to="/sites" replace />} />
             <Route path="tasks" element={<TasksPage />} />
@@ -38,6 +41,8 @@ export default function App() {
             <Route path="articles" element={<ArticlesPage />} />
             <Route path="articles/:articleId" element={<ArticlesPage />} />
             <Route path="capabilities" element={<CapabilitiesPage />} />
+            <Route path="capabilities/:capabilityId" element={<CapabilitiesPage />} />
+            <Route path="manual" element={<ManualPage />} />
             <Route path="settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Route>

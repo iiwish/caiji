@@ -8,7 +8,7 @@ import {
   RobotOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { PageTitle, SectionCard, StatusTag } from './ConsoleUI'
 import { usePrototype } from '../app/PrototypeContext'
 
@@ -18,22 +18,36 @@ function createCandidateVersion(version) {
   return `v${parts[0]}.${parts[1]}.${parts[2] + 1}-rc.1`
 }
 
-export function SiteRulePanel({ site, rule }) {
+export function SiteRulePanel({ site, rule, standalone = false }) {
   const { message } = AntApp.useApp()
   const navigate = useNavigate()
-  const { tasks, updateRule, runRegression, publishRule, startSiteAnalysis } = usePrototype()
+  const [params] = useSearchParams()
+  const { tasks, executions, updateRule, runRegression, publishRule, validateAndPublishRule, startSiteAnalysis, runTask } = usePrototype()
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(rule?.yaml || '')
+  const fromExecutionId = params.get('fromExecution')
+  const fromFailureId = params.get('fromFailure')
+  const editRequested = params.get('edit') === '1'
+  const sourceExecution = executions.find((execution) => execution.id === fromExecutionId)
+  const boundTasks = tasks.filter((task) => task.site === site.name)
 
   useEffect(() => {
-    setEditing(false)
+    setEditing(editRequested)
     setDraft(rule?.yaml || '')
-  }, [rule?.id, rule?.yaml])
+  }, [rule?.id, rule?.yaml, editRequested])
 
   const beginAnalysis = (kind) => {
     const url = rule?.entryUrl || site.entryUrl || `https://${site.host}`
-    const result = startSiteAnalysis({ siteName: site.name, siteHost: site.host, url, ruleId: rule?.id, kind })
-    navigate(`/ai?entry=${encodeURIComponent(result.entryId)}&site=${encodeURIComponent(site.host)}&mode=${kind}`)
+    const result = startSiteAnalysis({
+      siteName: site.name,
+      siteHost: site.host,
+      url,
+      ruleId: rule?.id,
+      kind,
+      failureId: fromFailureId || '',
+      sourceExecutionId: fromExecutionId || '',
+    })
+    navigate(`/ai?entry=${encodeURIComponent(result.entryId)}&site=${encodeURIComponent(site.host)}&mode=${kind}${fromExecutionId ? `&fromExecution=${encodeURIComponent(fromExecutionId)}` : ''}`)
   }
 
   if (!rule) {
@@ -49,7 +63,23 @@ export function SiteRulePanel({ site, rule }) {
     )
   }
 
-  const boundTasks = tasks.filter((task) => task.site === site.name)
+  const ruleReady = rule.status === '已发布' && rule.version !== 'v0.0.0'
+
+  const openPlans = () => {
+    if (boundTasks.length === 1) navigate(`/tasks?task=${encodeURIComponent(boundTasks[0].id)}`)
+    else navigate(`/tasks?site=${encodeURIComponent(site.host)}${boundTasks.length ? '' : '&create=1'}`)
+  }
+
+  const retrySourceExecution = () => {
+    if (!sourceExecution) return
+    const executionId = runTask(sourceExecution.taskId, sourceExecution.id)
+    if (!executionId) {
+      message.warning('请先发布可用规则并恢复采集计划')
+      return
+    }
+    message.success(`已创建重跑执行 ${executionId}`)
+    navigate(`/executions/${executionId}`)
+  }
 
   const saveCandidate = () => {
     const publishedYaml = rule.publishedYaml || rule.yaml
@@ -67,14 +97,24 @@ export function SiteRulePanel({ site, rule }) {
       health: '待回归',
     })
     setEditing(false)
-    message.success('已保存候选版本，线上任务继续使用当前发布版本')
+    message.success('已保存候选版本，线上采集计划继续使用当前发布版本')
   }
 
   const publish = () => {
     const result = publishRule(rule.id)
     if (!result) return message.warning('请先运行并通过回归验证')
-    if (result.syncedTasks) message.success(`已发布 ${result.version}，同步更新 ${result.syncedTasks} 个任务`)
+    if (result.syncedTasks) message.success(`已发布 ${result.version}，同步更新 ${result.syncedTasks} 个采集计划`)
     else message.success(`已发布 ${result.version}`)
+  }
+
+  const validateAndPublishRepair = () => {
+    const result = validateAndPublishRule(rule.id)
+    if (!result.ok) {
+      message.error(`验证未通过：${result.reason}`)
+      return
+    }
+    if (result.syncedTasks) message.success(`验证通过并发布 ${result.version}，已恢复 ${result.syncedTasks} 个采集计划`)
+    else message.success(`验证通过并发布 ${result.version}`)
   }
 
   const applyRepairSuggestion = () => {
@@ -90,18 +130,36 @@ export function SiteRulePanel({ site, rule }) {
     <div className="site-rule-panel">
       <section className="site-rule-summary">
         <div>
-          <div className="site-rule-title"><h3>采集规则</h3><StatusTag value={rule.status} /></div>
+          <div className="site-rule-title"><h2>{standalone ? '规则配置与发布' : '采集规则'}</h2><StatusTag value={rule.status} /></div>
           <span className="mono muted">{rule.id} · {rule.entryUrl}</span>
         </div>
         <Space wrap>
-          <Button onClick={() => navigate(`/tasks?site=${encodeURIComponent(site.host)}`)}>查看采集任务</Button>
+          {(boundTasks.length > 0 || ruleReady) && <Button onClick={openPlans}>{boundTasks.length ? '查看采集计划' : '创建采集计划'}</Button>}
           {!editing && <Button icon={<EditOutlined />} onClick={() => { setDraft(rule.yaml); setEditing(true) }}>编辑规则</Button>}
           {rule.status !== '需修复' && <Tooltip title="重新识别页面结构并生成候选规则，不影响当前生产版本"><Button aria-label="AI 重新分析" icon={<RobotOutlined />} onClick={() => beginAnalysis('reanalyze')} /></Tooltip>}
         </Space>
       </section>
 
-      <Descriptions className="site-rule-facts" column={{ xs: 1, sm: 2, lg: 4 }} items={[
-        { key: 'url', label: '网站 URL', children: <span className="mono">{rule.entryUrl}</span> },
+      {sourceExecution && (
+        <Alert
+          className="rule-repair-context"
+          type={ruleReady ? 'success' : 'warning'}
+          showIcon
+          title={ruleReady ? `规则已可用，可以重跑 ${sourceExecution.id}` : rule.candidateVersion ? '候选修复规则已生成' : `正在修复失败执行 ${sourceExecution.id}`}
+          description={ruleReady
+            ? '重跑会创建一条新的采集记录，并保留原失败执行用于追溯。'
+            : rule.candidateVersion
+              ? `${rule.candidateVersion} 尚未影响生产；验证通过后将发布并恢复关联计划。`
+              : `${sourceExecution.stage || '采集执行'} · ${sourceExecution.issue}`}
+          action={ruleReady
+            ? <Button type="primary" icon={<RocketOutlined />} onClick={retrySourceExecution}>重跑任务</Button>
+            : rule.candidateVersion
+              ? <Button type="primary" icon={<ExperimentOutlined />} onClick={validateAndPublishRepair}>验证并发布修复</Button>
+              : null}
+        />
+      )}
+
+      <Descriptions className="site-rule-facts" column={{ xs: 1, sm: 3 }} items={[
         { key: 'version', label: '发布版本', children: <span className="mono">{rule.version}</span> },
         { key: 'candidate', label: '候选版本', children: <span className="mono">{rule.candidateVersion || '-'}</span> },
         { key: 'health', label: '规则健康', children: <StatusTag value={rule.health} /> },
@@ -136,7 +194,7 @@ export function SiteRulePanel({ site, rule }) {
         <div className="site-rule-side">
           <SectionCard title={<PageTitle>验证与发布</PageTitle>}>
             <Timeline items={[
-              { color: 'green', icon: <CheckCircleOutlined />, content: <div><strong>生产版本 {rule.version}</strong><p className="muted">采集任务继续使用已冻结版本</p></div> },
+              { color: 'green', icon: <CheckCircleOutlined />, content: <div><strong>生产版本 {rule.version}</strong><p className="muted">采集计划继续使用已冻结版本</p></div> },
               { color: rule.candidateVersion ? 'blue' : 'gray', content: <div><strong>{rule.candidateVersion || '暂无候选版本'}</strong><p className="muted">编辑规则会生成候选快照</p></div> },
               { color: rule.regression === 'passed' ? 'green' : rule.regression === 'failed' ? 'red' : 'gray', content: <div><strong>回归验证：{rule.regression === 'passed' ? '已通过' : rule.regression === 'failed' ? '未通过' : '待运行'}</strong><p className="muted">{rule.regressionPassed ?? (rule.regression === 'passed' ? 20 : 0)}/{rule.regressionTotal || 20} 个样本{rule.regressionMessage ? ` · ${rule.regressionMessage}` : ''}</p></div> },
             ]} />
@@ -151,9 +209,9 @@ export function SiteRulePanel({ site, rule }) {
             </div>
           </SectionCard>
 
-          <SectionCard title={<PageTitle count={boundTasks.length}>采集任务</PageTitle>} bodyStyle={{ padding: 0 }}>
+          <SectionCard title={<PageTitle count={boundTasks.length}>采集计划</PageTitle>} bodyStyle={{ padding: 0 }}>
             <Table rowKey="id" size="small" pagination={false} dataSource={boundTasks} columns={[
-              { title: '任务', dataIndex: 'name' },
+              { title: '计划', dataIndex: 'name' },
               { title: '版本', dataIndex: 'ruleVersion', width: 80, render: (value) => <span className="mono">{value}</span> },
               { title: '状态', dataIndex: 'status', width: 80, render: (value) => <StatusTag value={value} /> },
             ]} />

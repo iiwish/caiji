@@ -12,9 +12,11 @@
     "@ant-design/icons": "latest",
     "antd": "latest",
     "dayjs": "latest",
+    "papaparse": "^5.5.4",
     "react": "latest",
     "react-dom": "latest",
-    "react-router-dom": "^7.18.1"
+    "react-router-dom": "^7.18.1",
+    "read-excel-file": "^9.3.2"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "latest",

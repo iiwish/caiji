@@ -142,7 +142,7 @@ export function DashboardPage() {
     .map((item) => ({
       ...item,
       batchId: `B-20726-${item.id.replace('EX-', '')}`,
-      type: item.task.includes('历史') ? '全量采集' : '定时增量',
+      type: item.collectionType?.includes('全量') || item.task.includes('历史') ? '全量采集' : '定时增量',
       startedAt: getStartedAt(item),
     }))
     .sort((first, second) => second.startedAt.localeCompare(first.startedAt))
@@ -223,7 +223,7 @@ export function DashboardPage() {
 
       <section className="dashboard-surface dashboard-recent-card">
         <header className="dashboard-recent-header">
-          <h2>最近采集任务</h2>
+          <h2>最近采集批次</h2>
           <Button type="link" size="small" icon={<RightOutlined />} iconPlacement="end" onClick={() => navigate('/executions')}>查看全部</Button>
         </header>
         <Table

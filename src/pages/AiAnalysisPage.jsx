@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
-import { App as AntApp, Button, Form, Input, Modal, Progress, Table } from 'antd'
+import { Alert, App as AntApp, Button, Empty, Form, Input, Modal, Progress, Select, Table } from 'antd'
 import {
   CaretRightOutlined,
+  CheckCircleOutlined,
   CheckOutlined,
   CloseOutlined,
   CodeOutlined,
@@ -11,6 +12,7 @@ import {
   PlusOutlined,
   ReloadOutlined,
   RobotOutlined,
+  RocketOutlined,
 } from '@ant-design/icons'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
 import { StatusTag } from '../components/ConsoleUI'
@@ -88,17 +90,17 @@ function getHost(url) {
   }
 }
 
-function getEntryPath(url) {
-  try {
-    const parsed = new URL(url)
-    return `${parsed.pathname}${parsed.search}` || '/'
-  } catch {
-    return url
-  }
+function normalizeHost(host) {
+  return String(host || '').toLowerCase().replace(/^www\./, '')
+}
+
+function isActiveAnalysis(entry) {
+  return !['审核完成', '已通过', '已完成', '已取消'].includes(entry.status)
 }
 
 function displayStatus(status) {
-  if (['待确认归属', '验证失败'].includes(status)) return '需订正'
+  if (status === '待确认归属') return '待确认'
+  if (status === '验证失败') return '需订正'
   return status
 }
 
@@ -139,15 +141,44 @@ function buildProfile(entry) {
   return { ...profile, confidence: entry.confidence || profile.confidence, config, rawContent }
 }
 
+function validateGeneratedConfig(configText) {
+  let config
+  try {
+    config = JSON.parse(configText)
+  } catch {
+    return { passed: false, passedCount: 0, total: 20, reason: '采集配置不是有效的 JSON' }
+  }
+  const required = [config?.list?.container, config?.fields?.title, config?.fields?.url]
+  if (required.some((value) => !String(value || '').trim())) {
+    return { passed: false, passedCount: 12, total: 20, reason: '列表容器或必要字段配置不完整' }
+  }
+  if (String(config.list.container).includes('div.m_list div.item')) {
+    return { passed: false, passedCount: 18, total: 20, reason: '仍有 2 个样本无法匹配当前列表选择器' }
+  }
+  return { passed: true, passedCount: 20, total: 20, reason: '结构、字段与质量门禁全部通过' }
+}
+
 export function AiAnalysisPage() {
   const { message } = AntApp.useApp()
   const navigate = useNavigate()
   const { search } = useOutletContext()
   const [params, setParams] = useSearchParams()
-  const { intakeBatches, updateBatchUrl, addBatch } = usePrototype()
+  const {
+    intakeBatches,
+    rules,
+    sites,
+    tasks,
+    executions,
+    updateBatchUrl,
+    approveBatchUrl,
+    startSiteAnalysis,
+    runTask,
+  } = usePrototype()
   const entryFilter = params.get('entry')
   const siteFilter = params.get('site')
-  const [selectedUrlId, setSelectedUrlId] = useState(entryFilter || intakeBatches[0]?.urls[0]?.id || '')
+  const fromExecution = params.get('fromExecution')
+  const fromFailure = params.get('fromFailure')
+  const [selectedUrlId, setSelectedUrlId] = useState(entryFilter || '')
   const [createOpen, setCreateOpen] = useState(false)
   const [rawPreview, setRawPreview] = useState(null)
   const [editingConfig, setEditingConfig] = useState(false)
@@ -155,7 +186,6 @@ export function AiAnalysisPage() {
   const [configDrafts, setConfigDrafts] = useState({})
   const [repairPrompt, setRepairPrompt] = useState('')
   const [workingUrlId, setWorkingUrlId] = useState('')
-  const [pendingOnly, setPendingOnly] = useState(false)
   const [createForm] = Form.useForm()
 
   const allEntries = useMemo(() => intakeBatches.flatMap((batch) => batch.urls.map((url, urlIndex) => ({
@@ -180,64 +210,144 @@ export function AiAnalysisPage() {
     }
     return timestamp(right) - timestamp(left) || left.urlIndex - right.urlIndex
   }), [intakeBatches])
-  const visibleEntries = useMemo(() => allEntries.filter((entry) => (
-    (!pendingOnly || entry.status !== '已通过')
-    && `${entry.site}${entry.url}${entry.batchName}${entry.status}`.toLowerCase().includes(search.toLowerCase())
-  )), [allEntries, pendingOnly, search])
-  const selected = allEntries.find((entry) => entry.id === selectedUrlId) || allEntries[0]
+  const activeEntries = useMemo(() => allEntries.filter(isActiveAnalysis), [allEntries])
+  const visibleEntries = useMemo(() => activeEntries.filter((entry) => (
+    `${entry.site}${entry.url}${entry.batchName}${entry.status}`.toLowerCase().includes(search.toLowerCase())
+  )), [activeEntries, search])
+  const requestedEntry = allEntries.find((entry) => entry.id === (entryFilter || selectedUrlId))
+  const selected = (requestedEntry?.releasePhase
+    ? requestedEntry
+    : activeEntries.find((entry) => entry.id === selectedUrlId || entry.id === entryFilter)) || activeEntries[0]
+  const occupiedAnalysisEntries = useMemo(() => allEntries.filter((entry) => isActiveAnalysis(entry)
+    || ['candidate', 'validation_failed', 'ready_to_publish'].includes(entry.releasePhase)), [allEntries])
+  const activeHosts = useMemo(() => new Set(occupiedAnalysisEntries.map((entry) => normalizeHost(getHost(entry.url)))), [occupiedAnalysisEntries])
+  const availableSites = useMemo(() => sites
+    .filter((site) => site.host && !activeHosts.has(normalizeHost(site.host)))
+    .map((site) => ({ value: site.id || site.host, label: `${site.name} · ${site.host}` })), [activeHosts, sites])
 
   useEffect(() => {
-    const contextualEntry = allEntries.find((entry) => entry.id === entryFilter)
-      || allEntries.find((entry) => getHost(entry.url) === siteFilter)
-    if (contextualEntry && contextualEntry.id !== selectedUrlId) setSelectedUrlId(contextualEntry.id)
-  }, [allEntries, entryFilter, selectedUrlId, siteFilter])
+    const releaseEntry = allEntries.find((entry) => entry.id === entryFilter && entry.releasePhase)
+    if (releaseEntry) {
+      if (releaseEntry.id !== selectedUrlId) setSelectedUrlId(releaseEntry.id)
+      return
+    }
+    const contextualEntry = activeEntries.find((entry) => entry.id === entryFilter)
+      || activeEntries.find((entry) => normalizeHost(getHost(entry.url)) === normalizeHost(siteFilter))
+    const nextSelected = contextualEntry || activeEntries.find((entry) => entry.id === selectedUrlId) || activeEntries[0]
+    if ((nextSelected?.id || '') !== selectedUrlId) setSelectedUrlId(nextSelected?.id || '')
+  }, [activeEntries, allEntries, entryFilter, selectedUrlId, siteFilter])
 
-  if (!selected) return null
+  const profile = selected ? buildProfile(selected) : null
+  const baseConfigText = profile ? JSON.stringify(profile.config, null, 2) : ''
+  const configText = selected ? (configDrafts[selected.id] || selected.approvedConfig || baseConfigText) : ''
+  const confidence = selected?.status === '分析中' ? 0 : profile?.confidence || 0
+  const isAnalyzing = selected?.status === '分析中' || workingUrlId === selected?.id
+  const isRestarting = workingUrlId === selected?.id
+  const selectedRule = selected ? rules.find((rule) => rule.id === selected.ruleId) : null
+  const selectedSourceExecution = selected?.sourceExecutionId || fromExecution || ''
+  const selectedFailure = selected?.failureId || fromFailure || ''
+  const matchingTasks = selected ? tasks.filter((task) => task.site === selected.site || task.ruleId === selected.ruleId) : []
+  const followingTasks = matchingTasks.filter((task) => task.versionPolicy === '跟随最新发布')
+  const automaticRegression = selected ? validateGeneratedConfig(configText) : { passed: false, passedCount: 0, total: 20, reason: '' }
 
-  const profile = buildProfile(selected)
-  const baseConfigText = JSON.stringify(profile.config, null, 2)
-  const configText = configDrafts[selected.id] || baseConfigText
-  const confidence = selected.status === '分析中' ? 0 : profile.confidence
-  const pendingCount = allEntries.filter((entry) => entry.status !== '已通过').length
-  const isAnalyzing = selected.status === '分析中' || workingUrlId === selected.id
-  const isRestarting = workingUrlId === selected.id
-  const isSiteRevision = Boolean(selected.analysisKind)
+  const paramsForEntry = (entry) => {
+    const nextParams = new URLSearchParams({ entry: entry.id, site: getHost(entry.url) })
+    if (entry.analysisKind) nextParams.set('mode', entry.analysisKind)
+    if (entry.failureId) nextParams.set('fromFailure', entry.failureId)
+    if (entry.sourceExecutionId) nextParams.set('fromExecution', entry.sourceExecutionId)
+    return nextParams
+  }
 
   const selectEntry = (entry) => {
     setSelectedUrlId(entry.id)
-    const nextParams = new URLSearchParams(params)
-    nextParams.set('entry', entry.id)
-    nextParams.set('site', getHost(entry.url))
-    setParams(nextParams, { replace: true })
+    setParams(paramsForEntry(entry), { replace: true })
     setEditingConfig(false)
     setRepairPrompt('')
   }
 
-  const togglePendingFilter = () => {
-    const nextPendingOnly = !pendingOnly
-    setPendingOnly(nextPendingOnly)
-    if (nextPendingOnly && selected.status === '已通过') {
-      const firstPending = allEntries.find((entry) => entry.status !== '已通过')
-      if (firstPending) selectEntry(firstPending)
-    }
-  }
-
   const updateSelected = (patch) => updateBatchUrl(selected.batchId, selected.id, patch)
 
-  const runAnalysis = (prompt = '') => {
-    const nextStatus = selected.status === '已通过' ? '已通过' : '待审核'
+  const runAnalysis = (prompt = '', nextConfigText = configText) => {
     setWorkingUrlId(selected.id)
-    updateSelected({ status: '分析中', issue: '' })
+    updateSelected({ status: '分析中', issue: '', releasePhase: '', releaseVersion: '', releaseError: '' })
     window.setTimeout(() => {
-      updateBatchUrl(selected.batchId, selected.id, { status: nextStatus, judgment: '已归属', confidence: profile.confidence, samples: 5, issue: '' })
+      const validation = validateGeneratedConfig(nextConfigText)
+      updateBatchUrl(selected.batchId, selected.id, {
+        status: validation.passed ? '待审核' : '验证失败',
+        judgment: '已归属',
+        confidence: profile.confidence,
+        samples: 5,
+        issue: validation.passed ? '' : validation.reason,
+        aiRegression: validation.passed ? 'passed' : 'failed',
+        regressionPassed: validation.passedCount,
+        regressionTotal: validation.total,
+      })
       setWorkingUrlId('')
-      message.success(prompt ? '二次分析完成，已生成新的候选配置' : '重新分析完成')
+      if (validation.passed) message.success(prompt ? '二次分析及自动回归完成，请审核发布' : '重新分析及自动回归完成，请审核发布')
+      else message.error(`自动回归未通过：${validation.reason}`)
     }, 900)
   }
 
   const approveSelected = () => {
-    updateSelected({ status: '已通过', judgment: '已归属', samples: 5, issue: '' })
-    message.success(isSiteRevision ? '已生成网站候选规则，生产版本保持不变' : '已审核通过，网站及采集规则已进入网站管理')
+    if (!automaticRegression.passed) return message.error(`自动回归未通过：${automaticRegression.reason}`)
+    const result = approveBatchUrl(selected.batchId, selected.id, configText)
+    if (!result?.ok) return message.error(result?.reason || '审核失败，请重新加载后再试')
+    setEditingConfig(false)
+    message.success(result.syncedTasks
+      ? `审核通过，规则 ${result.version} 已发布，并更新 ${result.syncedTasks} 个采集计划`
+      : `审核通过，规则 ${result.version} 已发布`)
+  }
+
+  const saveConfigCorrection = () => {
+    const validation = validateGeneratedConfig(workingDraft)
+    if (validation.passedCount === 0) {
+      message.error(validation.reason)
+      return
+    }
+    setConfigDrafts((items) => ({ ...items, [selected.id]: workingDraft }))
+    updateSelected({
+      status: validation.passed ? '待审核' : '验证失败',
+      issue: validation.passed ? '' : validation.reason,
+      aiRegression: validation.passed ? 'passed' : 'failed',
+      regressionPassed: validation.passedCount,
+      regressionTotal: validation.total,
+    })
+    setEditingConfig(false)
+    if (validation.passed) message.success('人工订正已保存，AI 自动回归通过')
+    else message.warning(`人工订正已保存，但自动回归未通过：${validation.reason}`)
+  }
+
+  const continueAnalysisQueue = () => {
+    const nextEntry = activeEntries[0]
+    if (!nextEntry) {
+      setSelectedUrlId('')
+      navigate('/ai')
+      return
+    }
+    setSelectedUrlId(nextEntry.id)
+    setParams(paramsForEntry(nextEntry), { replace: true })
+  }
+
+  const continueApprovedFlow = () => {
+    if (selectedSourceExecution) {
+      const sourceExecution = executions.find((execution) => execution.id === selectedSourceExecution)
+      const executionId = sourceExecution ? runTask(sourceExecution.taskId, sourceExecution.id) : null
+      if (!executionId) {
+        message.warning('未找到可重跑的失败任务，请前往采集管理检查计划状态')
+        return
+      }
+      message.success(`已创建重跑执行 ${executionId}`)
+      navigate(`/executions/${executionId}`)
+      return
+    }
+    const onboarding = selected.analysisKind === 'onboarding'
+    if (onboarding || !matchingTasks.length) {
+      navigate(`/tasks?site=${encodeURIComponent(normalizeHost(getHost(selected.url)))}&create=1${onboarding ? '&setup=onboarding' : ''}`)
+      return
+    }
+    navigate(matchingTasks.length === 1
+      ? `/tasks?task=${encodeURIComponent(matchingTasks[0].id)}`
+      : `/tasks?site=${encodeURIComponent(normalizeHost(getHost(selected.url)))}`)
   }
 
   const submitCorrection = () => {
@@ -246,24 +356,83 @@ export function AiAnalysisPage() {
       return
     }
     const prompt = repairPrompt
+    let revisedConfigText = configText
+    try {
+      const revisedConfig = JSON.parse(configText)
+      if (String(revisedConfig?.list?.container || '').includes('div.m_list div.item')) {
+        revisedConfig.list.container = 'section.notice-list article.notice-item'
+      }
+      delete revisedConfig._warnings
+      revisedConfigText = JSON.stringify(revisedConfig, null, 2)
+      setConfigDrafts((items) => ({ ...items, [selected.id]: revisedConfigText }))
+    } catch {
+      // Invalid manual JSON remains available for explicit correction.
+    }
     setRepairPrompt('')
-    runAnalysis(prompt)
+    runAnalysis(prompt, revisedConfigText)
   }
 
-  const submitBatch = async () => {
+  const submitAnalysisTask = async () => {
     const values = await createForm.validateFields()
-    const urls = values.urls.split(/\n+/).map((item) => item.trim()).filter(Boolean)
-    try {
-      urls.forEach((url) => new URL(url))
-    } catch {
-      message.error('请输入完整有效的 URL，每行一个')
-      return
-    }
-    addBatch(values.name, urls)
-    setSelectedUrlId('')
+    const site = sites.find((item) => (item.id || item.host) === values.siteId)
+    if (!site) return message.error('网站资产不存在，请重新选择')
+    const rule = rules.find((item) => normalizeHost(item.siteHost) === normalizeHost(site.host))
+    const result = startSiteAnalysis({
+      siteName: site.name,
+      siteHost: site.host,
+      url: site.entryUrl || `https://${site.host}`,
+      ruleId: rule?.id,
+      kind: rule ? 'reanalyze' : 'onboarding',
+    })
+    setSelectedUrlId(result.entryId)
+    setParams(new URLSearchParams({ entry: result.entryId, site: site.host }), { replace: true })
     setCreateOpen(false)
     createForm.resetFields()
-    message.success('AI 分析批次已创建')
+    message.success(result.existing ? '已打开该网站的活动分析任务' : 'AI 分析任务已创建')
+  }
+
+  const taskModal = (
+    <Modal
+      title="新建 AI 分析任务"
+      open={createOpen}
+      onCancel={() => setCreateOpen(false)}
+      onOk={submitAnalysisTask}
+      okText="创建并开始分析"
+      width={560}
+      okButtonProps={{ disabled: !availableSites.length }}
+    >
+      <Form form={createForm} layout="vertical">
+        <Form.Item name="siteId" label="网站资产" rules={[{ required: true, message: '请选择需要分析的网站' }]}>
+          <Select
+            showSearch
+            optionFilterProp="label"
+            placeholder={availableSites.length ? '选择网站或搜索域名' : '所有网站均有活动分析任务'}
+            options={availableSites}
+            notFoundContent="没有可创建任务的网站"
+          />
+        </Form.Item>
+      </Form>
+    </Modal>
+  )
+
+  if (!selected) {
+    return (
+      <div className="page-content ai-analysis-layout ai-analysis-empty-layout">
+        <section className="analysis-surface ai-analysis-queue">
+          <header className="ai-queue-header">
+            <div><div className="ai-queue-title"><h2>分析队列</h2><span className="ai-section-count">0 个任务</span></div><p>当前没有活动分析任务</p></div>
+            <Button type="primary" size="small" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新建任务</Button>
+          </header>
+        </section>
+        <main className="analysis-surface ai-empty-workbench">
+          <Empty description="当前没有活动分析任务">
+            <Button onClick={() => navigate('/sites')}>前往网站管理</Button>
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新建分析任务</Button>
+          </Empty>
+        </main>
+        {taskModal}
+      </div>
+    )
   }
 
   const copyConfig = async () => {
@@ -272,7 +441,7 @@ export function AiAnalysisPage() {
   }
 
   const fieldColumns = [
-    { title: '字段', dataIndex: 'label', width: 150, render: (value, row) => <div className="ai-field-name"><strong>{value}</strong><span className="mono">{row.name}</span></div> },
+    { title: '字段', dataIndex: 'label', width: 150, render: (value) => <div className="ai-field-name"><strong>{value}</strong></div> },
     { title: 'CSS / XPath 选择器', dataIndex: 'selector', width: 220, render: (value) => <code className={`selector-code ${value.includes('未定位') ? 'invalid' : ''}`}>{value}</code> },
     {
       title: '示例值', dataIndex: 'sample', render: (value, row) => row.raw
@@ -295,6 +464,21 @@ export function AiAnalysisPage() {
     { title: '详情链接', dataIndex: 'url', width: 190, responsive: ['lg'], render: (value) => <span className="mono ai-detail-link">{value}</span> },
     { title: '原始数据', dataIndex: 'rawTag', width: 112, render: (value) => <Button className="ai-raw-button" size="small" icon={<ExpandAltOutlined />} onClick={() => setRawPreview({ title: `${selected.site} · ${value}`, content: profile.rawContent })}>{value}</Button> },
   ]
+  const releasePhase = selected.releasePhase || ''
+  const isReleaseHandoff = releasePhase === 'published'
+  const releaseVersion = selected.releaseVersion || selectedRule?.version || '-'
+  const approvalNextLabel = selectedSourceExecution
+    ? '重跑失败任务'
+    : selected.analysisKind === 'onboarding' || !matchingTasks.length
+      ? '配置首次采集'
+      : '查看采集计划'
+  const reviewBlockedReason = selected.status === '分析中'
+    ? 'AI 分析尚未完成'
+    : editingConfig
+      ? '请先保存或取消当前订正'
+      : !automaticRegression.passed
+        ? `自动回归未通过：${automaticRegression.reason}`
+        : ''
 
   return (
     <div className="page-content ai-analysis-layout">
@@ -303,25 +487,61 @@ export function AiAnalysisPage() {
           <div>
             <div className="ai-queue-title">
               <h2>分析队列</h2>
-              <button className={`ai-queue-filter ${pendingOnly ? 'active' : ''}`} type="button" aria-pressed={pendingOnly} onClick={togglePendingFilter}>{pendingCount} 个待处理</button>
+              <span className="ai-section-count">{activeEntries.length} 个任务</span>
             </div>
-            <p>AI 已完成解析，待人工审核</p>
+            <p>进行中、待审核与需订正</p>
           </div>
-          <Button type="primary" size="small" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新建</Button>
+          <Button type="primary" size="small" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新建任务</Button>
         </header>
         <div className="ai-analysis-queue-list">
           {visibleEntries.map((entry) => (
             <button className={`ai-analysis-item ${entry.id === selected.id ? 'active' : ''}`} key={entry.id} onClick={() => selectEntry(entry)} aria-pressed={entry.id === selected.id}>
               <span className="ai-analysis-item-top"><strong>{entry.site}</strong><StatusTag value={displayStatus(entry.status)} /></span>
-              <span className="ai-analysis-item-entry"><span className="mono">{entry.id}</span><span className="mono" title={entry.url}>{getEntryPath(entry.url)}</span></span>
-              <span className="ai-analysis-item-meta"><span className="mono">{getHost(entry.url)}</span><span className="mono">置信度 {entry.status === '分析中' ? '解析中' : `${entry.confidence || buildProfile(entry).confidence}%`}</span></span>
+              <span className="ai-analysis-item-entry">
+                <span className="mono ai-analysis-item-url" title={`${entry.id} · ${entry.url}`}>{entry.url}</span>
+                <span className="mono ai-analysis-item-confidence" title="置信度">{entry.status === '分析中' ? '解析中' : `${entry.confidence || buildProfile(entry).confidence}%`}</span>
+              </span>
             </button>
           ))}
-          {!visibleEntries.length && <div className="ai-queue-empty">{pendingOnly ? '没有待处理的数据源' : '没有匹配的数据源'}</div>}
+          {!visibleEntries.length && <div className="ai-queue-empty">没有匹配的分析任务</div>}
         </div>
       </section>
 
       <main className="ai-analysis-main">
+        {isReleaseHandoff ? (
+          <section className="analysis-surface ai-approval-handoff">
+            <div className="ai-handoff-heading">
+              <div className="ai-handoff-icon success"><CheckCircleOutlined /></div>
+              <div>
+                <span className="ai-handoff-eyebrow">审核与发布已完成</span>
+                <h1>采集规则已发布</h1>
+                <p>{selectedSourceExecution
+                  ? 'AI 自动回归和人工审核均已通过，生产规则已经更新，可以重跑原失败任务。'
+                  : 'AI 自动回归和人工审核均已通过，规则已经同步到网站资产。'}</p>
+              </div>
+            </div>
+
+            <div className="ai-handoff-facts">
+              <div><span>发布版本</span><strong className="mono">{releaseVersion}</strong><small>已同步网站资产</small></div>
+              <div><span>AI 自动回归</span><strong>已通过</strong><small>{selected.regressionPassed || selectedRule?.regressionPassed || 20}/{selected.regressionTotal || selectedRule?.regressionTotal || 20} 个样本</small></div>
+              <div><span>影响范围</span><strong>{matchingTasks.length} 个采集计划</strong><small>{followingTasks.length} 个将跟随最新版本</small></div>
+            </div>
+
+            <div className="ai-handoff-steps" aria-label="规则发布进度">
+              <div className="done"><b><CheckOutlined /></b><span><strong>AI 自动回归</strong><small>已通过</small></span></div>
+              <i />
+              <div className="done"><b><CheckOutlined /></b><span><strong>人工审核</strong><small>已通过</small></span></div>
+              <i />
+              <div className="done"><b><CheckOutlined /></b><span><strong>发布上线</strong><small>已完成</small></span></div>
+            </div>
+
+            <div className="ai-handoff-actions">
+              <Button onClick={continueAnalysisQueue}>继续处理队列</Button>
+              <Button type="primary" icon={<RocketOutlined />} onClick={continueApprovedFlow}>{approvalNextLabel}</Button>
+            </div>
+          </section>
+        ) : (
+          <>
         <section className="analysis-surface ai-detail-header">
           <span className="ai-detail-icon"><RobotOutlined /></span>
           <div className="ai-detail-identity">
@@ -330,9 +550,39 @@ export function AiAnalysisPage() {
           </div>
           <div className="ai-detail-actions">
             <Button icon={<ReloadOutlined />} disabled={isRestarting} onClick={() => runAnalysis()}>{selected.status === '分析中' ? '重新开始分析' : '重新分析'}</Button>
-            <Button type="primary" icon={<CheckOutlined />} disabled={isAnalyzing || selected.status === '已通过'} onClick={approveSelected}>{selected.status === '已通过' ? '已审核' : '审核通过'}</Button>
+            <Button type="primary" icon={<CheckOutlined />} title={reviewBlockedReason} disabled={Boolean(reviewBlockedReason)} onClick={approveSelected}>{selected.status === '待确认归属' ? '确认规则' : reviewBlockedReason ? '暂不可审核' : '审核通过'}</Button>
           </div>
         </section>
+
+        {selected.analysisKind === 'diagnose' && (
+            <Alert
+            className="ai-flow-context"
+            type="warning"
+            showIcon
+            title={`正在修复 ${selected.site} 的失败采集`}
+            description={`${selectedSourceExecution ? `失败执行 ${selectedSourceExecution}` : selectedFailure || '失败队列'} · AI 自动回归通过后，点击审核通过将直接发布修复规则。`}
+          />
+        )}
+
+        {selected.analysisKind === 'onboarding' && (
+          <Alert
+              className="ai-flow-context"
+              type="info"
+              showIcon
+              title="首次接入分析"
+              description="AI 已自动执行样本回归；确认字段和采集样例后，点击审核通过即可发布初始规则。"
+          />
+        )}
+
+        {!isAnalyzing && (
+          <Alert
+            className="ai-flow-context ai-auto-regression"
+            type={automaticRegression.passed ? 'success' : 'error'}
+            showIcon
+            title={automaticRegression.passed ? `AI 自动回归通过 · ${automaticRegression.passedCount}/${automaticRegression.total} 个样本` : `AI 自动回归未通过 · ${automaticRegression.passedCount}/${automaticRegression.total} 个样本`}
+            description={automaticRegression.passed ? '结构、字段和质量门禁均已通过，人工审核后将直接发布。' : `${automaticRegression.reason}，请人工订正或重新分析。`}
+          />
+        )}
 
         {isAnalyzing ? (
           <section className="analysis-surface ai-pipeline-card">
@@ -370,7 +620,7 @@ export function AiAnalysisPage() {
                   {editingConfig ? (
                     <>
                       <Button size="small" icon={<CloseOutlined />} onClick={() => setEditingConfig(false)}>取消</Button>
-                      <Button type="primary" size="small" icon={<CheckOutlined />} onClick={() => { setConfigDrafts((items) => ({ ...items, [selected.id]: workingDraft })); setEditingConfig(false); message.success('人工订正已保存') }}>保存订正</Button>
+                      <Button type="primary" size="small" icon={<CheckOutlined />} onClick={saveConfigCorrection}>保存并自动回归</Button>
                     </>
                   ) : (
                     <>
@@ -396,16 +646,11 @@ export function AiAnalysisPage() {
             </section>
           </>
         )}
+          </>
+        )}
       </main>
 
-      <Modal title="新建 AI 分析" open={createOpen} onCancel={() => setCreateOpen(false)} onOk={submitBatch} okText="创建并开始分析" width={640}>
-        <Form form={createForm} layout="vertical" initialValues={{ name: '新 URL 接入分析' }}>
-          <Form.Item name="name" label="批次名称" rules={[{ required: true, message: '请输入批次名称' }]}><Input /></Form.Item>
-          <Form.Item name="urls" label="URL，每行一个" rules={[{ required: true, message: '请至少输入一个 URL' }]}>
-            <Input.TextArea rows={7} placeholder={'https://example.com/notice/list\nhttps://example.com/notice/result'} />
-          </Form.Item>
-        </Form>
-      </Modal>
+      {taskModal}
 
       <Modal title={rawPreview?.title} open={Boolean(rawPreview)} onCancel={() => setRawPreview(null)} footer={<Button onClick={() => setRawPreview(null)}>关闭</Button>} width={860}>
         <p className="raw-modal-sub">完整原始数据仅用于人工核对字段与选择器。</p>

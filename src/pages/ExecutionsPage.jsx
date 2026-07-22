@@ -1,14 +1,17 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Alert, App as AntApp, Button, DatePicker, Descriptions, Dropdown, Grid, Select, Space, Table, Tabs } from 'antd'
-import { CaretRightOutlined, ClearOutlined, EllipsisOutlined, LeftOutlined, ReloadOutlined, ToolOutlined } from '@ant-design/icons'
+import { Alert, Button, DatePicker, Grid, Input, Modal, Select, Table } from 'antd'
+import { CalendarOutlined, ClearOutlined, DatabaseOutlined, GlobalOutlined, SearchOutlined, ToolOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { useNavigate, useOutletContext, useParams, useSearchParams } from 'react-router-dom'
-import { PageTitle, SectionCard, SourceCell, StatusTag } from '../components/ConsoleUI'
+import { RowActions, SectionCard, SourceCell, StatusTag } from '../components/ConsoleUI'
 import { usePrototype } from '../app/PrototypeContext'
+import { recordDetails } from '../data'
+import { getSiteRulePath } from '../app/routes'
 
 const { RangePicker } = DatePicker
 
 function getExecutionType(row, tasks) {
+  if (row.collectionType) return row.collectionType
   const task = tasks.find((item) => item.id === row.taskId)
   const scope = task?.scope || '增量'
   return task?.executionMode === '单次' ? `单次${scope}` : `定时${scope}`
@@ -20,27 +23,165 @@ function getExecutionDate(value) {
   return date.isValid() ? date : null
 }
 
-function getSiteRulePath(row) {
+function getBatchId(execution) {
+  return `B-20726-${execution.id.replace('EX-', '')}`
+}
+
+function isRuleFailure(row) {
+  return row.status === '失败' && (row.stage === '列表发现' || /结构|定位|选择器|解析/.test(row.issue || ''))
+}
+
+function getExecutionRulePath(row, includeSource = false) {
   try {
     const host = new URL(row.url).host.replace(/^www\./, '')
-    return `/sites?site=${encodeURIComponent(host)}&tab=rule`
+    return getSiteRulePath(host, includeSource ? { fromExecution: row.id } : {})
   } catch {
     return '/sites'
   }
 }
 
-function ExecutionsList() {
-  const { message } = AntApp.useApp()
+function getBatchRecords(execution) {
+  if (!execution?.articles) return []
+  return recordDetails.slice(0, Math.min(recordDetails.length, execution.articles)).map((record, index) => {
+    const detailUrl = `/notice/detail/${8800 + index}.html`
+    const projectNo = `ZB-2026-${String(7000 + index * 13).padStart(5, '0')}`
+    const raw = `<html>
+<head><title>${record.title}</title></head>
+<body>
+  <div class="notice-detail">
+    <h1 class="tit">${record.title}</h1>
+    <div class="info">发布时间：${record.date}  采购单位：${record.buyer}  公告类型：${record.type}</div>
+    <div class="content">
+      <p>受采购人委托，现对本项目进行${record.type}，欢迎符合资格条件的供应商参与投标。</p>
+      <p>一、项目编号：${projectNo}</p>
+      <p>二、获取采购文件的时间、地点及方式：详见公告正文。</p>
+      <p>三、响应截止时间：2026-07-${String(20 + (index % 8)).padStart(2, '0')} 17:00。</p>
+    </div>
+  </div>
+</body>
+</html>`
+    return { ...record, key: `${execution.id}-${record.key}`, detailUrl, raw }
+  })
+}
+
+function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewTask }) {
+  const [detailSearch, setDetailSearch] = useState('')
+  const [page, setPage] = useState(1)
+  const records = useMemo(() => getBatchRecords(execution), [execution])
+  const visibleRecords = useMemo(() => {
+    const keyword = detailSearch.trim().toLowerCase()
+    if (!keyword) return records
+    return records.filter((record) => (
+      `${record.title}${record.date}${record.buyer}${record.type}${record.detailUrl}`.toLowerCase().includes(keyword)
+    ))
+  }, [detailSearch, records])
+
+  useEffect(() => {
+    setDetailSearch('')
+    setPage(1)
+  }, [execution?.id])
+
+  const columns = [
+    { title: '公告标题', dataIndex: 'title', width: 360, render: (value) => <strong className="batch-record-title">{value}</strong> },
+    { title: '发布时间', dataIndex: 'date', width: 120, render: (value) => <span className="mono batch-record-date">{value}</span> },
+    { title: '采购单位', dataIndex: 'buyer', width: 145 },
+    { title: '类型', dataIndex: 'type', width: 100, render: (value) => <span className="batch-record-type">{value}</span> },
+  ]
+
+  return (
+    <Modal
+      className="batch-details-modal"
+      width={860}
+      open={open}
+      onCancel={onClose}
+      footer={null}
+      centered
+      title={execution && (
+        <div className="batch-details-title">
+          <span className="batch-details-title-icon"><DatabaseOutlined /></span>
+          <div>
+            <div className="batch-details-title-line"><strong>采集明细</strong><span className="mono">{getBatchId(execution)}</span></div>
+            <p>{execution.site} · 共采集 <b className="mono">{execution.articles.toLocaleString()}</b> 条 · {execution.finishedAt}{execution.retryOf ? <> · 重跑自 <b className="mono">{getBatchId({ id: execution.retryOf })}</b></> : null}</p>
+          </div>
+        </div>
+      )}
+    >
+      {execution && ['失败', '部分失败'].includes(execution.status) && (
+        <Alert
+          className="execution-diagnostic-alert"
+          type={execution.status === '失败' ? 'error' : 'warning'}
+          showIcon
+          title={`${execution.stage || '采集执行'}：${execution.issue || '执行过程中存在失败项'}`}
+          description={<div className="execution-diagnostic-meta"><span>规则 <b className="mono">{execution.ruleId} · {execution.ruleVersion}</b></span><span>执行耗时 <b className="mono">{execution.duration}</b></span></div>}
+          action={isRuleFailure(execution)
+            ? <Button type="primary" danger icon={<ToolOutlined />} onClick={() => onRepairRule(execution)}>修复网站规则</Button>
+            : <Button onClick={() => onViewTask(execution)}>查看采集计划</Button>}
+        />
+      )}
+      {execution?.logs?.length > 0 && ['失败', '部分失败'].includes(execution.status) && (
+        <details className="execution-diagnostic-log">
+          <summary>查看执行日志</summary>
+          <pre className="mono">{execution.logs.join('\n')}</pre>
+        </details>
+      )}
+      <div className="batch-details-search">
+        <Input
+          allowClear
+          prefix={<SearchOutlined />}
+          placeholder="搜索公告标题、采购单位、类型或详情链接"
+          value={detailSearch}
+          onChange={(event) => {
+            setDetailSearch(event.target.value)
+            setPage(1)
+          }}
+        />
+        <span className="batch-details-search-count">{detailSearch ? `找到 ${visibleRecords.length} 条` : `展示 ${records.length} 条采集样本`}</span>
+      </div>
+      <Table
+        className="batch-details-table"
+        rowKey="key"
+        columns={columns}
+        dataSource={visibleRecords}
+        tableLayout="fixed"
+        scroll={{ x: 773, y: 470 }}
+        locale={{ emptyText: detailSearch ? '没有匹配的采集明细' : '本次执行未采集到明细数据' }}
+        expandable={{
+          expandRowByClick: true,
+          rowExpandable: () => true,
+          expandedRowRender: (record) => (
+            <div className="batch-record-expanded">
+              <div className="batch-record-link"><span>详情页链接</span><code>{record.detailUrl}</code></div>
+              <div className="batch-record-raw-label">原始采集内容 · raw_html</div>
+              <pre className="batch-record-raw mono">{record.raw}</pre>
+            </div>
+          ),
+        }}
+        pagination={{
+          current: page,
+          pageSize: 10,
+          showSizeChanger: false,
+          onChange: setPage,
+          showTotal: (total, range) => detailSearch
+            ? `第 ${range[0]}–${range[1]} 条 · 找到 ${total} 条`
+            : `第 ${range[0]}–${range[1]} 条 · 批次共 ${execution?.articles.toLocaleString() || 0} 条`,
+        }}
+      />
+    </Modal>
+  )
+}
+
+function ExecutionsList({ initialExecution }) {
   const navigate = useNavigate()
   const { search } = useOutletContext()
   const [params] = useSearchParams()
   const screens = Grid.useBreakpoint()
-  const { executions, tasks, runTask } = usePrototype()
+  const { executions, tasks } = usePrototype()
   const statusParam = params.get('status')
   const [siteFilter, setSiteFilter] = useState()
   const [typeFilter, setTypeFilter] = useState()
   const [statusFilter, setStatusFilter] = useState(statusParam || undefined)
   const [dateRange, setDateRange] = useState(null)
+  const [selectedExecution, setSelectedExecution] = useState(initialExecution || null)
 
   const executionRows = useMemo(() => executions.map((row) => ({
     ...row,
@@ -57,7 +198,7 @@ function ExecutionsList() {
         && !executionDate.isBefore(dateRange[0].startOf('day'))
         && !executionDate.isAfter(dateRange[1].endOf('day'))
     })())
-    && `${row.id}${row.task}${row.site}${row.url}`.toLowerCase().includes(search.trim().toLowerCase())
+    && `${row.id}${getBatchId(row)}${row.task}${row.site}${row.url}`.toLowerCase().includes(search.trim().toLowerCase())
   )), [executions, tasks, search, siteFilter, typeFilter, statusFilter, dateRange])
 
   const siteOptions = useMemo(() => [...new Set(executionRows.map((row) => row.site))].map((value) => ({ value, label: value })), [executionRows])
@@ -69,15 +210,8 @@ function ExecutionsList() {
   }, [statusParam])
 
   useEffect(() => {
-    if (params.get('scope') === 'needs-handling') navigate('/failures', { replace: true })
-  }, [navigate, params])
-
-  const retry = (row) => {
-    const nextId = runTask(row.taskId, row.id)
-    if (!nextId) return message.warning('关联任务或规则不可用，无法重试')
-    message.success(`已创建重试记录 ${nextId}`)
-    navigate(`/executions/${nextId}`)
-  }
+    setSelectedExecution(initialExecution || null)
+  }, [initialExecution])
 
   const clearFilters = () => {
     setSiteFilter(undefined)
@@ -87,25 +221,30 @@ function ExecutionsList() {
     if (statusParam) navigate('/executions', { replace: true })
   }
 
-  const renderActions = (row, mobile = false) => (
-    <Space size={mobile ? 2 : 4} className="execution-actions">
-      <Button type="link" onClick={() => navigate(`/executions/${row.id}`)}>详情</Button>
-      {['失败', '部分失败'].includes(row.status) && <Button size="small" icon={<ReloadOutlined />} onClick={() => retry(row)}>重试</Button>}
-      <Dropdown menu={{ items: [{ key: 'task', label: '查看任务', onClick: () => navigate(`/tasks?task=${row.taskId}`) }, { key: 'rule', label: '查看网站规则', onClick: () => navigate(getSiteRulePath(row)) }] }}>
-        <Button type="text" aria-label={`${row.id} 更多操作`} icon={<EllipsisOutlined />} />
-      </Dropdown>
-    </Space>
-  )
+  const openDetails = (row) => setSelectedExecution(row)
+  const closeDetails = () => {
+    setSelectedExecution(null)
+    if (initialExecution) navigate('/executions', { replace: true })
+  }
+
+  const renderActions = (row) => {
+    const menuItems = [
+      ...(isRuleFailure(row) ? [{ key: 'repair-rule', icon: <ToolOutlined />, label: '修复网站规则', onClick: () => navigate(getExecutionRulePath(row, true)) }] : []),
+      { key: 'task', icon: <CalendarOutlined />, label: '查看采集计划', onClick: () => navigate(`/tasks?task=${row.taskId}`) },
+      { key: 'rule', icon: <GlobalOutlined />, label: '查看网站规则', onClick: () => navigate(getExecutionRulePath(row)) },
+    ]
+    return <RowActions menu={menuItems} moreLabel={`${getBatchId(row)} 更多操作`} />
+  }
 
   const columns = [
-    { title: '批次 ID', dataIndex: 'id', width: 112, render: (value) => <Button type="link" className="execution-batch-link mono" onClick={() => navigate(`/executions/${value}`)}>{value}</Button> },
+    { title: '批次 ID', dataIndex: 'id', width: 132, render: (_, row) => <Button type="link" className="execution-batch-link mono" onClick={() => openDetails(row)}>{getBatchId(row)}</Button> },
     { title: '数据源', width: 215, render: (_, row) => <SourceCell name={row.site} host={row.task} /> },
     { title: '采集类型', dataIndex: 'collectionType', width: 112, render: (value) => <span className={`collection-mode-tag ${value.includes('全量') ? 'full' : 'incremental'}`}>{value}</span> },
     { title: '采集量', dataIndex: 'articles', width: 90, align: 'right', render: (value) => <span className="mono value-strong">{value.toLocaleString()}</span> },
     { title: '耗时', dataIndex: 'duration', width: 82, align: 'right', render: (value) => <span className="mono muted execution-duration">{value}</span> },
     { title: '完成时间', dataIndex: 'finishedAt', width: 116, render: (value) => <span className="mono muted execution-finished-at">{value}</span> },
     { title: '状态', dataIndex: 'status', width: 102, render: (value) => <StatusTag value={value} /> },
-    { title: '操作', width: 158, fixed: 'right', align: 'right', render: (_, row) => renderActions(row) },
+    { title: '操作', width: 72, fixed: 'right', align: 'right', render: (_, row) => renderActions(row) },
   ]
 
   return (
@@ -119,17 +258,14 @@ function ExecutionsList() {
           <RangePicker aria-label="按完成日期筛选" allowClear value={dateRange} onChange={setDateRange} placeholder={['开始日期', '结束日期']} />
           {(siteFilter || typeFilter || statusFilter || dateRange) && <Button type="text" icon={<ClearOutlined />} onClick={clearFilters}>重置</Button>}
         </div>
-        <div className="toolbar-spacer" />
-        <Button icon={<CaretRightOutlined />} onClick={() => navigate('/tasks')}>进入采集任务</Button>
       </div>
 
       {screens.md === false ? (
-        <section className="execution-mobile-section" aria-label="生产执行记录">
-          <header><PageTitle count={visible.length}>生产执行记录</PageTitle></header>
+        <section className="execution-mobile-section" aria-label="采集批次列表">
           <div className="execution-mobile-list">
             {visible.map((row) => (
               <article className="execution-mobile-item" key={row.id}>
-                <div className="execution-mobile-head"><button className="execution-mobile-id mono" onClick={() => navigate(`/executions/${row.id}`)}>{row.id}</button><StatusTag value={row.status} /></div>
+                <div className="execution-mobile-head"><button className="execution-mobile-id mono" onClick={() => openDetails(row)}>{getBatchId(row)}</button><StatusTag value={row.status} /></div>
                 <div className="execution-mobile-source"><strong>{row.site}</strong><span>{row.task}</span></div>
                 <dl>
                   <div><dt>采集类型</dt><dd>{getExecutionType(row, tasks)}</dd></div>
@@ -137,72 +273,24 @@ function ExecutionsList() {
                   <div><dt>完成时间</dt><dd className="mono">{row.finishedAt}</dd></div>
                   <div><dt>耗时</dt><dd className="mono">{row.duration}</dd></div>
                 </dl>
-                <footer>{renderActions(row, true)}</footer>
+                <footer>{renderActions(row)}</footer>
               </article>
             ))}
             {!visible.length && <div className="execution-mobile-empty">没有符合当前筛选条件的采集记录</div>}
           </div>
         </section>
       ) : (
-        <SectionCard title={<PageTitle count={visible.length}>生产执行记录</PageTitle>} bodyStyle={{ padding: 0 }}>
-          <Table rowKey="id" columns={columns} dataSource={executionRows.filter((row) => visible.some((item) => item.id === row.id))} pagination={{ pageSize: 10, showSizeChanger: false }} tableLayout="fixed" scroll={{ x: 987 }} />
+        <SectionCard bodyStyle={{ padding: 0 }}>
+          <Table rowKey="id" columns={columns} dataSource={executionRows.filter((row) => visible.some((item) => item.id === row.id))} pagination={{ pageSize: 10, showSizeChanger: false }} tableLayout="fixed" scroll={{ x: 1007 }} />
         </SectionCard>
       )}
-    </div>
-  )
-}
-
-function ExecutionDetail({ execution }) {
-  const { message } = AntApp.useApp()
-  const navigate = useNavigate()
-  const { runTask } = usePrototype()
-  const [activeEvidence, setActiveEvidence] = useState(['失败', '部分失败', '运行中', '重试中'].includes(execution.status) ? 'logs' : 'articles')
-  const retry = () => {
-    const nextId = runTask(execution.taskId, execution.id)
-    if (!nextId) return message.warning('关联任务或规则不可用，无法重试')
-    message.success(`已创建重试记录 ${nextId}`)
-    navigate(`/executions/${nextId}`)
-  }
-  const hasIssue = ['失败', '部分失败'].includes(execution.status)
-  const isProcessing = ['运行中', '重试中'].includes(execution.status)
-  useEffect(() => {
-    if (execution.status === '成功') setActiveEvidence('articles')
-  }, [execution.status])
-  return (
-    <div className="page-content detail-page">
-      <div className="back-row"><Button icon={<LeftOutlined />} onClick={() => navigate('/executions')}>返回采集记录</Button><span>执行详情</span></div>
-      <SectionCard className="detail-hero" bodyStyle={{ padding: 20 }}>
-        <div className="detail-titlebar">
-          <div><div className="detail-titleline"><h2>{execution.site} · {execution.task}</h2><StatusTag value={execution.status} /></div><span className="mono muted">{execution.id} · {execution.url}</span></div>
-          <Space>{['失败', '部分失败'].includes(execution.status) && <Button icon={<ReloadOutlined />} onClick={retry}>重试并创建新记录</Button>}</Space>
-        </div>
-        <Descriptions className="detail-facts" column={{ xs: 1, sm: 2, lg: 4 }} items={[
-          { key: 'time', label: '完成时间', children: execution.finishedAt },
-          { key: 'duration', label: '耗时', children: execution.duration },
-          { key: 'discovered', label: '发现', children: execution.discovered.toLocaleString() },
-          { key: 'articles', label: '入库原文', children: execution.articles.toLocaleString() },
-          { key: 'rule', label: '冻结规则', children: <Button type="link" className="inline-link mono" onClick={() => navigate(getSiteRulePath(execution))}>{execution.ruleId} · {execution.ruleVersion}</Button> },
-          { key: 'task', label: '来源任务', children: <Button type="link" className="inline-link mono" onClick={() => navigate(`/tasks?task=${execution.taskId}`)}>{execution.taskId}</Button> },
-          { key: 'retry', label: '重试来源', children: execution.retryOf || '-' },
-          { key: 'url', label: '冻结 URL', children: <span className="mono">{execution.url}</span> },
-        ]} />
-      </SectionCard>
-
-      {isProcessing && <Alert type="info" showIcon title={execution.status === '重试中' ? '重试执行正在运行' : '采集执行正在运行'} description="原型会依次完成列表发现、正文入库和质量检查，完成后自动刷新本页状态。" />}
-
-      {hasIssue && <SectionCard className="execution-issue" title={<PageTitle>当前问题</PageTitle>}>
-        <div className="issue-workflow">
-          <div><StatusTag value="需处理" /><h3>{execution.issue || '重试执行正在等待结果'}</h3><p>阶段：{execution.stage || '执行队列'} · 原执行事实保持不变，修复后会创建新的执行记录。</p></div>
-          {execution.ruleId && <Button type="primary" danger icon={<ToolOutlined />} onClick={() => navigate(getSiteRulePath(execution))}>修复网站规则</Button>}
-        </div>
-      </SectionCard>}
-
-      <SectionCard title={<PageTitle>追查证据</PageTitle>}>
-        <Tabs activeKey={activeEvidence} onChange={setActiveEvidence} items={[
-          { key: 'logs', label: '执行日志', children: <pre className="execution-log">{execution.logs.join('\n')}</pre> },
-          { key: 'articles', label: `产物链路（${execution.articles}）`, children: execution.articles ? <div className="artifact-entry"><div><strong>本次执行已入库 {execution.articles.toLocaleString()} 条原文</strong><p>目标列表会保留执行筛选，便于抽查本次产物。</p></div><Button type="primary" onClick={() => navigate(`/articles?execution=${execution.id}`)}>查看本次入库</Button></div> : <Alert type="info" showIcon title="本次执行没有入库原文" /> },
-        ]} />
-      </SectionCard>
+      <BatchDetailsModal
+        execution={selectedExecution}
+        open={Boolean(selectedExecution)}
+        onClose={closeDetails}
+        onRepairRule={(row) => navigate(getExecutionRulePath(row, true))}
+        onViewTask={(row) => navigate(`/tasks?task=${row.taskId}`)}
+      />
     </div>
   )
 }
@@ -211,7 +299,7 @@ export function ExecutionsPage() {
   const { executionId } = useParams()
   const { executions } = usePrototype()
   if (!executionId) return <ExecutionsList />
-  const execution = executions.find((item) => item.id === executionId)
-  if (!execution) return <div className="page-content"><Alert type="error" showIcon title="执行记录不存在" /></div>
-  return <ExecutionDetail execution={execution} />
+  const execution = executionId ? executions.find((item) => item.id === executionId) : null
+  if (!execution) return <div className="page-content"><Alert type="error" showIcon title="采集批次不存在" /></div>
+  return <ExecutionsList initialExecution={execution} />
 }

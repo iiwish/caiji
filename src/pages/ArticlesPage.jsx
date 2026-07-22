@@ -1,9 +1,45 @@
 import { useMemo, useState } from 'react'
 import { Alert, App as AntApp, Button, Descriptions, Modal, Segmented, Space, Table } from 'antd'
-import { ExportOutlined, LeftOutlined, MergeCellsOutlined, ToolOutlined } from '@ant-design/icons'
+import { CodeOutlined, CopyOutlined, ExportOutlined, LeftOutlined, MergeCellsOutlined, ToolOutlined } from '@ant-design/icons'
 import { useNavigate, useOutletContext, useParams, useSearchParams } from 'react-router-dom'
-import { PageTitle, SectionCard, SourceCell, StatusTag } from '../components/ConsoleUI'
+import { PageTitle, RowActions, SectionCard, StatusTag } from '../components/ConsoleUI'
 import { usePrototype } from '../app/PrototypeContext'
+import { getSiteRulePath } from '../app/routes'
+
+function getArticleSource(article, rule) {
+  const trimmed = String(article.rawContent || '').trim()
+  const inferredType = article.rawType
+    || (article.id === 'AR-12480' ? 'json' : '')
+    || (/^[\[{]/.test(trimmed) || rule?.yaml?.includes('strategy: api') ? 'json' : 'html')
+  if (trimmed) {
+    if (inferredType === 'json') {
+      try {
+        return { type: 'json', content: JSON.stringify(JSON.parse(trimmed), null, 2) }
+      } catch {
+        return { type: 'json', content: trimmed }
+      }
+    }
+    return { type: 'html', content: trimmed }
+  }
+  if (inferredType === 'json') {
+    return {
+      type: 'json',
+      content: JSON.stringify({
+        id: article.id,
+        title: article.title,
+        url: article.url,
+        publish_time: article.publishTime,
+        source: article.site,
+        content: article.content,
+        collected_at: article.collectedAt,
+      }, null, 2),
+    }
+  }
+  return {
+    type: 'html',
+    content: `<!DOCTYPE html>\n<html lang="zh-CN">\n<head>\n  <meta charset="utf-8">\n  <title>${article.title}</title>\n</head>\n<body>\n  <article class="notice-detail" data-source="${article.site}">\n    <h1>${article.title}</h1>\n    <time datetime="${article.publishTime}">${article.publishTime}</time>\n    <div class="notice-content">\n      <p>${article.content}</p>\n    </div>\n  </article>\n</body>\n</html>`,
+  }
+}
 
 function ArticlesList() {
   const { message } = AntApp.useApp()
@@ -19,18 +55,21 @@ function ArticlesList() {
     `${article.id}${article.title}${article.site}${article.url}`.includes(search)
   )), [articles, executionFilter, scope, search])
   const columns = [
-    { title: '原文', render: (_, row) => <SourceCell name={row.title} host={row.id} /> },
+    { title: 'ID', dataIndex: 'id', width: 110, render: (value) => <span className="mono">{value}</span> },
+    { title: '原文', dataIndex: 'title', width: 300, ellipsis: true, render: (value, row) => <button type="button" className="table-entity-link" onClick={() => navigate(`/articles/${row.id}`)}>{value}</button> },
     { title: '来源网站', dataIndex: 'site', width: 220 },
     { title: '发布时间', dataIndex: 'publishTime', width: 118, render: (value) => <span className="mono">{value}</span> },
     { title: '采集时间', dataIndex: 'collectedAt', width: 112, render: (value) => <span className="mono muted">{value}</span> },
     { title: '质量', dataIndex: 'quality', width: 126, render: (value) => <StatusTag value={value} /> },
-    { title: '操作', width: 120, fixed: 'right', align: 'right', render: (_, row) => <Button type="link" onClick={() => navigate(`/articles/${row.id}`)}>详情</Button> },
+    { title: '操作', width: 112, fixed: 'right', align: 'right', render: (_, row) => row.quality === '通过'
+      ? <span className="table-action-empty">—</span>
+      : <RowActions primary={{ label: '处理质量', onClick: () => navigate(`/articles/${row.id}`) }} /> },
   ]
   return (
     <div className="page-content">
       {executionFilter && <Alert className="context-filter-alert" type="info" showIcon closable onClose={() => navigate('/articles')} title={<>当前仅显示执行 <b className="mono">{executionFilter}</b> 的入库原文</>} />}
       <div className="list-toolbar"><Segmented value={scope} onChange={setScope} options={['全部', '需处理']} /><div className="toolbar-spacer" /><Button icon={<ExportOutlined />} onClick={() => message.success(`已生成 ${visible.length} 条原文的导出任务`)}>导出</Button></div>
-      <SectionCard title={<PageTitle count={visible.length}>原文记录</PageTitle>} bodyStyle={{ padding: 0 }}>
+      <SectionCard bodyStyle={{ padding: 0 }}>
         <Table rowKey="id" columns={columns} dataSource={visible} pagination={{ pageSize: 10, showSizeChanger: false }} scroll={{ x: 980 }} />
       </SectionCard>
     </div>
@@ -43,10 +82,17 @@ function ArticleDetail({ article }) {
   const { resolveArticleQuality, rules } = usePrototype()
   const [duplicateOpen, setDuplicateOpen] = useState(false)
   const sourceRule = rules.find((rule) => rule.id === article.ruleId)
-  const siteRulePath = sourceRule ? `/sites?site=${encodeURIComponent(sourceRule.siteHost)}&tab=rule` : '/sites'
+  const rawSource = getArticleSource(article, sourceRule)
+  const sourceLines = rawSource.content.split('\n')
+  const sourceBytes = new Blob([rawSource.content]).size
+  const siteRulePath = sourceRule ? getSiteRulePath(sourceRule.siteHost) : '/sites'
   const resolveNoise = () => {
     resolveArticleQuality(article.id, '通过')
     message.success('质量状态已更新；规则修复仍需在回归发布后生效')
+  }
+  const copySource = async () => {
+    await navigator.clipboard.writeText(rawSource.content)
+    message.success('原始内容已复制')
   }
   return (
     <div className="page-content detail-page article-detail-page">
@@ -54,7 +100,16 @@ function ArticleDetail({ article }) {
       <div className="article-detail-grid">
         <article className="article-document">
           <div className="article-heading"><span className="mono muted">{article.id}</span><h1>{article.title}</h1><div><span>{article.site}</span><span>{article.publishTime}</span></div></div>
-          <div className="article-body"><p>{article.content}</p><p>本原文由采集平台按照冻结规则版本获取并经过确定性质量门禁，可通过右侧来源信息追溯到对应执行和规则。</p></div>
+          <section className="article-source-viewer">
+            <header className="article-source-toolbar">
+              <div><CodeOutlined /><strong>原始内容</strong><span className={`article-source-kind ${rawSource.type}`}>{rawSource.type.toUpperCase()}</span></div>
+              <Button size="small" icon={<CopyOutlined />} onClick={copySource}>复制</Button>
+            </header>
+            <div className="article-source-meta"><span>{sourceLines.length} 行</span><span>{sourceBytes.toLocaleString()} Bytes</span><span className="mono">UTF-8</span></div>
+            <div className="article-source-code" role="region" aria-label={`${rawSource.type.toUpperCase()} 原始内容`}>
+              {sourceLines.map((line, index) => <div className="article-source-line" key={`${index}-${line}`}><span>{index + 1}</span><code>{line || ' '}</code></div>)}
+            </div>
+          </section>
         </article>
         <aside className="article-aside">
           <SectionCard title={<PageTitle>原文信息</PageTitle>}>
@@ -62,6 +117,7 @@ function ArticleDetail({ article }) {
               { key: 'site', label: '来源网站', children: article.site },
               { key: 'publish', label: '发布时间', children: article.publishTime },
               { key: 'collected', label: '采集时间', children: article.collectedAt },
+              { key: 'format', label: '内容格式', children: <span className={`article-source-kind ${rawSource.type}`}>{rawSource.type.toUpperCase()}</span> },
               { key: 'quality', label: '质量状态', children: <StatusTag value={article.quality} /> },
               { key: 'url', label: '原网页', children: <a href={article.url} target="_blank" rel="noreferrer">打开原网页 <ExportOutlined /></a> },
             ]} />
