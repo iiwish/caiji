@@ -428,18 +428,15 @@ export function AiAnalysisPage() {
         message.warning('未找到可重跑的失败任务，请前往采集管理检查计划状态')
         return
       }
-      setHandoffEntryId('')
       message.success(`已创建重跑执行 ${executionId}`)
       navigate(`/executions/${executionId}`)
       return
     }
     const onboarding = selected.analysisKind === 'onboarding'
     if (onboarding || !matchingTasks.length) {
-      setHandoffEntryId('')
       navigate(`/tasks?site=${encodeURIComponent(normalizeHost(getHost(selected.url)))}&create=1${onboarding ? '&setup=onboarding' : ''}`)
       return
     }
-    setHandoffEntryId('')
     navigate(matchingTasks.length === 1
       ? `/tasks?task=${encodeURIComponent(matchingTasks[0].id)}`
       : `/tasks?site=${encodeURIComponent(normalizeHost(getHost(selected.url)))}`)
