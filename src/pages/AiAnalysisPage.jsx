@@ -246,6 +246,7 @@ export function AiAnalysisPage() {
   const [configDrafts, setConfigDrafts] = useState({})
   const [repairPrompt, setRepairPrompt] = useState('')
   const [workingUrlId, setWorkingUrlId] = useState('')
+  const [handoffEntryId, setHandoffEntryId] = useState('')
   const [createForm] = Form.useForm()
 
   const allEntries = useMemo(() => intakeBatches.flatMap((batch) => batch.urls.map((url, urlIndex) => ({
@@ -296,9 +297,13 @@ export function AiAnalysisPage() {
     if (!entryFilter) return
     const entry = allEntries.find((item) => item.id === entryFilter)
     if (!entry) return
-    if (!isHistoryView && !isActiveAnalysis(entry)) navigate(`/ai/history?${params.toString()}`, { replace: true })
+    if (!isHistoryView && !isActiveAnalysis(entry) && entry.id !== handoffEntryId) navigate(`/ai/history?${params.toString()}`, { replace: true })
     if (isHistoryView && isActiveAnalysis(entry)) navigate(`/ai?${params.toString()}`, { replace: true })
-  }, [allEntries, entryFilter, isHistoryView, navigate, params])
+  }, [allEntries, entryFilter, handoffEntryId, isHistoryView, navigate, params])
+
+  useEffect(() => {
+    if (isHistoryView && handoffEntryId) setHandoffEntryId('')
+  }, [handoffEntryId, isHistoryView])
 
   useEffect(() => {
     if (params.get('create') !== '1') return
@@ -343,6 +348,7 @@ export function AiAnalysisPage() {
   }
 
   const selectEntry = (entry) => {
+    setHandoffEntryId('')
     setSelectedUrlId(entry.id)
     setParams(paramsForEntry(entry), { replace: true })
     setEditingConfig(false)
@@ -376,6 +382,7 @@ export function AiAnalysisPage() {
     if (!automaticRegression.passed) return message.error(`自动回归未通过：${automaticRegression.reason}`)
     const result = approveBatchUrl(selected.batchId, selected.id, configText)
     if (!result?.ok) return message.error(result?.reason || '审核失败，请重新加载后再试')
+    setHandoffEntryId(selected.id)
     setEditingConfig(false)
     message.success(result.syncedTasks
       ? `审核通过，规则 ${result.version} 已发布，并更新 ${result.syncedTasks} 个采集计划`
@@ -402,6 +409,7 @@ export function AiAnalysisPage() {
   }
 
   const continueAnalysisQueue = () => {
+    setHandoffEntryId('')
     const nextEntry = activeEntries[0]
     if (!nextEntry) {
       setSelectedUrlId('')
@@ -420,15 +428,18 @@ export function AiAnalysisPage() {
         message.warning('未找到可重跑的失败任务，请前往采集管理检查计划状态')
         return
       }
+      setHandoffEntryId('')
       message.success(`已创建重跑执行 ${executionId}`)
       navigate(`/executions/${executionId}`)
       return
     }
     const onboarding = selected.analysisKind === 'onboarding'
     if (onboarding || !matchingTasks.length) {
+      setHandoffEntryId('')
       navigate(`/tasks?site=${encodeURIComponent(normalizeHost(getHost(selected.url)))}&create=1${onboarding ? '&setup=onboarding' : ''}`)
       return
     }
+    setHandoffEntryId('')
     navigate(matchingTasks.length === 1
       ? `/tasks?task=${encodeURIComponent(matchingTasks[0].id)}`
       : `/tasks?site=${encodeURIComponent(normalizeHost(getHost(selected.url)))}`)
@@ -466,6 +477,7 @@ export function AiAnalysisPage() {
       parentAnalysisId: entry.id,
       source: 'AI 分析历史',
     })
+    setHandoffEntryId('')
     setSelectedUrlId(result.entryId)
     navigate(`/ai?${new URLSearchParams({ entry: result.entryId, site: normalizeHost(getHost(entry.url)) }).toString()}`, { replace: true })
     message.success(result.existing ? '已打开该网站的活动分析任务' : '重新分析任务已创建')
