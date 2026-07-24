@@ -3,34 +3,60 @@ import {
   Alert,
   App as AntApp,
   Button,
-  Descriptions,
+  Dropdown,
   Grid,
+  Input,
   Modal,
   Pagination,
   Segmented,
-  Space,
   Table,
+  Tree,
+  TreeSelect,
   Tooltip,
+  Upload,
 } from 'antd'
 import {
   AppstoreOutlined,
   CheckOutlined,
+  CheckCircleOutlined,
   ClockCircleOutlined,
-  CodeOutlined,
-  HistoryOutlined,
-  InfoCircleOutlined,
+  DeleteOutlined,
+  EditOutlined,
+  FolderAddOutlined,
+  FolderOpenOutlined,
+  FolderOutlined,
+  InboxOutlined,
   LineChartOutlined,
+  MoreOutlined,
   RobotOutlined,
-  SettingOutlined,
+  StarOutlined,
+  StopOutlined,
   UnorderedListOutlined,
+  UploadOutlined,
   WarningOutlined,
 } from '@ant-design/icons'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
+import Papa from 'papaparse'
 import { RowActions, SourceCell, StatusTag } from '../components/ConsoleUI'
+import { FolderTreeSelect } from '../components/FolderTreeSelect'
 import { usePrototype } from '../app/PrototypeContext'
-import { getSiteRulePath } from '../app/routes'
+import { getSiteWorkspacePath } from '../app/routes'
+import {
+  ROOT_FOLDER_VALUE,
+  buildSiteFolderTree,
+  getFolderBranchIds,
+  getFolderPath,
+  toFolderTreeSelectData,
+} from '../app/siteFolderModel'
 
 const PAGE_SIZE = 12
+const SITE_SCOPE_STATUSES = {
+  全部: null,
+  可采集: ['可采集'],
+  接入中: ['待分析', '排队中', '分析中', '待审核'],
+  需处理: ['需处理'],
+  已停用: ['已停用'],
+}
 
 function normalizeHost(host) {
   return String(host || '').toLowerCase().replace(/^www\./, '')
@@ -42,6 +68,61 @@ function getUrlHost(url) {
   } catch {
     return ''
   }
+}
+
+function isValidWebsiteUrl(url) {
+  try {
+    return ['http:', 'https:'].includes(new URL(url).protocol)
+  } catch {
+    return false
+  }
+}
+
+function workbookRowsToSites(matrix) {
+  if (!matrix.length) return []
+  const normalizedHeader = matrix[0].map((value) => String(value || '').trim().toLowerCase())
+  const aliases = {
+    name: ['名称', '网站名称', '数据源', 'name'],
+    url: ['网址', '网站url', 'url', '入口url'],
+    freq: ['采集频率', '频率', 'frequency'],
+  }
+  const findColumn = (field, fallback) => {
+    const index = normalizedHeader.findIndex((value) => aliases[field].includes(value))
+    return index >= 0 ? index : fallback
+  }
+  const hasHeader = normalizedHeader.some((value) => Object.values(aliases).flat().includes(value))
+  const nameIndex = findColumn('name', 0)
+  const urlIndex = findColumn('url', 1)
+  const freqIndex = findColumn('freq', 2)
+  return matrix.slice(hasHeader ? 1 : 0).map((row, index) => {
+    const firstCell = String(row[0] || '').trim()
+    const secondCell = String(row[1] || '').trim()
+    const isUrlOnlyRow = isValidWebsiteUrl(firstCell) && !isValidWebsiteUrl(secondCell)
+    const url = isUrlOnlyRow ? firstCell : String(row[urlIndex] || '').trim()
+    return {
+      key: `IMPORT-${index}`,
+      name: isUrlOnlyRow ? '' : String(row[nameIndex] || '').trim(),
+      url,
+      freq: isUrlOnlyRow ? secondCell : String(row[freqIndex] || '').trim(),
+      valid: isValidWebsiteUrl(url),
+    }
+  }).filter((row) => row.name || row.url)
+}
+
+function pastedTextToSites(value) {
+  const parsed = Papa.parse(String(value || '').replace(/^\uFEFF/, ''), { skipEmptyLines: true })
+  return workbookRowsToSites(parsed.data)
+}
+
+function resolveKnownSiteNames(rows, sites) {
+  return rows.map((row) => {
+    if (row.name) return row
+    const host = getUrlHost(row.url)
+    const existing = sites.find((site) => normalizeHost(site.host) === host)
+    const knownName = String(existing?.name || '').trim()
+    const canReuseName = knownName && normalizeHost(knownName) !== host && knownName !== '待识别网站'
+    return { ...row, name: canReuseName ? knownName : '' }
+  })
 }
 
 function isActiveAnalysis(entry) {
@@ -56,36 +137,57 @@ function getSiteId(site) {
 }
 
 export function SitesPage() {
-  const { message } = AntApp.useApp()
+  const { message, modal } = AntApp.useApp()
   const navigate = useNavigate()
   const screens = Grid.useBreakpoint()
   const { search } = useOutletContext()
-  const [params, setParams] = useSearchParams()
-  const { sites, tasks, rules, intakeBatches, startSiteAnalysis } = usePrototype()
+  const [params] = useSearchParams()
+  const {
+    sites,
+    siteFolders,
+    defaultSiteFolderId,
+    tasks,
+    rules,
+    intakeBatches,
+    importSites,
+    createSiteFolder,
+    renameSiteFolder,
+    deleteSiteFolder,
+    setDefaultSiteFolder,
+    moveSitesToFolder,
+    setSitesEnabled,
+    createSiteAnalysisBatch,
+    startSiteAnalysis,
+  } = usePrototype()
   const [scope, setScope] = useState('全部')
+  const [folderFilter, setFolderFilter] = useState('all')
   const [view, setView] = useState('list')
   const [page, setPage] = useState(1)
-  const [selected, setSelected] = useState(null)
+  const [importOpen, setImportOpen] = useState(false)
+  const [importMode, setImportMode] = useState('paste')
+  const [importText, setImportText] = useState('')
+  const [importRows, setImportRows] = useState([])
+  const [importFileName, setImportFileName] = useState('')
+  const [importLoading, setImportLoading] = useState(false)
+  const [importFolderId, setImportFolderId] = useState('')
+  const [folderDialog, setFolderDialog] = useState(null)
+  const [folderName, setFolderName] = useState('')
+  const [folderParentId, setFolderParentId] = useState(ROOT_FOLDER_VALUE)
+  const [expandedFolderIds, setExpandedFolderIds] = useState(() => siteFolders.map((folder) => folder.id))
+  const [moveTargets, setMoveTargets] = useState([])
+  const [moveFolderId, setMoveFolderId] = useState('')
+  const [selectedSiteIds, setSelectedSiteIds] = useState([])
 
   const activeAnalyses = useMemo(() => intakeBatches
     .flatMap((batch) => batch.urls.map((entry) => ({ ...entry, batchId: batch.id })))
     .filter(isActiveAnalysis), [intakeBatches])
-
-  const analysisHistoryCounts = useMemo(() => {
-    const counts = new Map()
-    intakeBatches.flatMap((batch) => batch.urls).filter((entry) => !isActiveAnalysis(entry)).forEach((entry) => {
-      const host = normalizeHost(entry.siteHost || getUrlHost(entry.url))
-      counts.set(host, (counts.get(host) || 0) + 1)
-    })
-    return counts
-  }, [intakeBatches])
 
   const analysisByHost = useMemo(() => {
     const entries = new Map()
     activeAnalyses.forEach((entry) => {
       const host = normalizeHost(entry.siteHost || getUrlHost(entry.url))
       const current = entries.get(host)
-      if (!current || entry.status === '分析中') entries.set(host, entry)
+      if (!current || ['分析中', '排队中'].includes(entry.status)) entries.set(host, entry)
     })
     return entries
   }, [activeAnalyses])
@@ -93,12 +195,13 @@ export function SitesPage() {
   const registrySites = useMemo(() => sites.map((row) => {
     const host = normalizeHost(row.host)
     const siteRule = rules.find((rule) => normalizeHost(rule.siteHost) === host)
-    const siteTasks = tasks.filter((task) => task.site === row.name)
+    const siteTasks = tasks.filter((task) => task.siteId === row.id || task.site === row.name || task.ruleId === siteRule?.id)
     const analysisEntry = analysisByHost.get(host)
     let status = '可采集'
     if (['已停用', '已暂停'].includes(row.status)) status = '已停用'
     else if (row.status === '异常' || siteRule?.status === '需修复') status = '需处理'
     else if (analysisEntry?.status === '分析中') status = '分析中'
+    else if (analysisEntry?.status === '排队中') status = '排队中'
     else if (analysisEntry) status = '待审核'
     else if (!siteRule || (siteRule.version === 'v0.0.0' && siteRule.status !== '已发布')) status = '待分析'
     else if (['候选版本', '待审核'].includes(siteRule.status)) status = '待审核'
@@ -112,60 +215,54 @@ export function SitesPage() {
       ruleStatus: siteRule?.status || '待配置',
       ruleVersion: siteRule?.version || '-',
       taskCount: siteTasks.length,
+      collectionTask: siteTasks[0] || null,
       analysisEntry,
     }
   }), [analysisByHost, sites, tasks, rules])
 
-  const visibleRows = useMemo(() => registrySites.filter((row) => (
-    (scope === '全部' || row.status === scope) &&
-    `${row.id}${row.name}${row.host}`.toLowerCase().includes(search.trim().toLowerCase())
-  )), [registrySites, scope, search])
+  const activeFolderBranchIds = useMemo(() => (
+    siteFolders.some((folder) => folder.id === folderFilter)
+      ? getFolderBranchIds(siteFolders, folderFilter)
+      : null
+  ), [folderFilter, siteFolders])
+  const visibleRows = useMemo(() => registrySites.filter((row) => {
+    const matchesFolder = folderFilter === 'all'
+      || row.folderId === folderFilter
+      || Boolean(activeFolderBranchIds?.has(row.folderId))
+    const scopeStatuses = SITE_SCOPE_STATUSES[scope]
+    return matchesFolder
+      && (!scopeStatuses || scopeStatuses.includes(row.status))
+      && `${row.id}${row.name}${row.host}`.toLowerCase().includes(search.trim().toLowerCase())
+  }), [activeFolderBranchIds, folderFilter, registrySites, scope, search])
+  const selectedSites = useMemo(() => registrySites.filter((row) => selectedSiteIds.includes(row.id)), [registrySites, selectedSiteIds])
 
   useEffect(() => {
     setPage(1)
-  }, [scope, search, sites.length])
+  }, [folderFilter, scope, search, sites.length])
 
   const pagedRows = useMemo(() => (
     visibleRows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   ), [page, visibleRows])
 
   const countByStatus = (status) => registrySites.filter((row) => row.status === status).length
+  const onboardingCount = SITE_SCOPE_STATUSES['接入中'].reduce((count, status) => count + countByStatus(status), 0)
   const siteStats = [
     { label: '网站总数', value: registrySites.length, tone: 'indigo', icon: <LineChartOutlined /> },
     { label: '可采集', value: countByStatus('可采集'), tone: 'green', icon: <CheckOutlined /> },
-    { label: '待分析', value: countByStatus('待分析'), tone: 'amber', icon: <ClockCircleOutlined /> },
+    { label: '接入中', value: onboardingCount, tone: 'amber', icon: <ClockCircleOutlined /> },
     { label: '需处理', value: countByStatus('需处理'), tone: 'red', icon: <WarningOutlined /> },
   ]
-  const selectedRule = selected ? rules.find((rule) => normalizeHost(rule.siteHost) === normalizeHost(selected.host)) : null
-  const selectedTasks = selected ? tasks.filter((task) => task.site === selected.name) : []
-  const selectedTask = selectedTasks[0] || null
-
   useEffect(() => {
     const host = params.get('site')
     if (!host) return
-    if (params.get('tab') === 'rule') {
-      const legacyQuery = Object.fromEntries([...params.entries()].filter(([key]) => !['site', 'tab'].includes(key)))
-      navigate(getSiteRulePath(host, legacyQuery), { replace: true })
-      return
-    }
     const contextualSite = registrySites.find((site) => normalizeHost(site.host) === normalizeHost(host))
     if (!contextualSite) return
-    setSelected(contextualSite)
+    const legacyQuery = Object.fromEntries([...params.entries()].filter(([key]) => !['site', 'tab'].includes(key)))
+    navigate(getSiteWorkspacePath(contextualSite, params.get('tab') === 'rule' ? 'rule' : 'overview', legacyQuery), { replace: true })
   }, [navigate, params, registrySites])
 
   const openSite = (row) => {
-    setSelected(row)
-    const nextParams = new URLSearchParams(params)
-    nextParams.set('site', row.host)
-    nextParams.delete('tab')
-    setParams(nextParams, { replace: true })
-  }
-
-  const openCollectionConfiguration = (row) => {
-    const matchingTasks = tasks.filter((task) => task.site === row.name)
-    navigate(matchingTasks.length === 1
-      ? `/tasks?task=${encodeURIComponent(matchingTasks[0].id)}`
-      : `/tasks?site=${encodeURIComponent(row.host)}`)
+    navigate(getSiteWorkspacePath(row, 'overview'))
   }
 
   const openAnalysis = (row) => {
@@ -180,29 +277,250 @@ export function SitesPage() {
       url: row.entryUrl || rule?.entryUrl || `https://${row.host}`,
       ruleId: rule?.id,
       kind: rule ? 'reanalyze' : 'onboarding',
+      folderId: row.folderId || defaultSiteFolderId,
     })
     message.success(result.existing ? '已打开该网站的活动分析任务' : 'AI 分析任务已创建')
     navigate(`/ai?entry=${encodeURIComponent(result.entryId)}&site=${encodeURIComponent(row.host)}`)
   }
 
-  const primaryAction = (row) => {
-    if (row.analysisEntry || ['待分析', '分析中', '待审核'].includes(row.status)) return openAnalysis(row)
-    return openCollectionConfiguration(row)
+  const workflowAction = (row) => {
+    if (row.status === '待分析') return { label: '分析', ariaLabel: `分析 ${row.name}`, onClick: () => openAnalysis(row) }
+    if (row.status === '排队中') return { label: '队列', ariaLabel: `查看 ${row.name} 的队列位置`, onClick: () => openAnalysis(row) }
+    if (row.status === '分析中') return { label: '进度', ariaLabel: `查看 ${row.name} 的分析进度`, onClick: () => openAnalysis(row) }
+    if (row.status === '待审核') return { label: '审核', ariaLabel: `审核 ${row.name} 的分析结果`, onClick: () => openAnalysis(row) }
+    if (row.status === '需处理') return { label: '处理', ariaLabel: `处理 ${row.name} 的问题`, className: 'danger', onClick: () => openSite(row) }
+    return null
   }
 
-  const primaryActionLabel = (row) => {
-    if (row.analysisEntry) return '查看分析'
-    if (['待分析', '分析中', '待审核'].includes(row.status)) return 'AI 分析'
-    return '采集配置'
+  const managementMenu = (row) => {
+    const canReanalyze = !row.analysisEntry && !['待分析', '分析中', '待审核'].includes(row.status)
+    return [
+      ...(canReanalyze ? [{ key: 'reanalyze', icon: <RobotOutlined />, label: '重新分析', onClick: () => openAnalysis(row) }, { type: 'divider' }] : []),
+      { key: 'folder', icon: <FolderOutlined />, label: '移动到文件夹', onClick: () => openMoveToFolder(row) },
+    ]
   }
 
-  const closeSite = () => {
-    setSelected(null)
-    const nextParams = new URLSearchParams(params)
-    nextParams.delete('site')
-    nextParams.delete('tab')
-    setParams(nextParams, { replace: true })
+  const openCreateFolder = (parentId = null) => {
+    setFolderName('')
+    setFolderParentId(parentId || ROOT_FOLDER_VALUE)
+    setFolderDialog({ mode: 'create' })
   }
+
+  const openRenameFolder = (folder) => {
+    setFolderName(folder.name)
+    setFolderParentId(folder.parentId || ROOT_FOLDER_VALUE)
+    setFolderDialog({ mode: 'rename', folder })
+  }
+
+  const saveFolder = () => {
+    const result = folderDialog?.mode === 'rename'
+      ? renameSiteFolder(folderDialog.folder.id, folderName)
+      : createSiteFolder(folderName, folderParentId === ROOT_FOLDER_VALUE ? null : folderParentId)
+    if (!result?.ok) {
+      message.warning(result?.reason || '文件夹保存失败')
+      return
+    }
+    setFolderDialog(null)
+    setFolderName('')
+    if (result.folder) {
+      setFolderFilter(result.folder.id)
+      setExpandedFolderIds((ids) => [...new Set([...ids, result.folder.parentId, result.folder.id].filter(Boolean))])
+    }
+    message.success(folderDialog?.mode === 'rename' ? '文件夹已重命名' : '文件夹已创建')
+  }
+
+  const confirmDeleteFolder = (folder) => {
+    const affectedCount = sites.filter((site) => site.folderId === folder.id).length
+    modal.confirm({
+      title: `删除文件夹“${folder.name}”？`,
+      content: affectedCount
+        ? `其中 ${affectedCount} 个网站将移到上级文件夹，子文件夹也会提升一级。网站资产不会被删除。`
+        : '子文件夹会提升一级，网站资产不会被删除。',
+      okText: '删除文件夹',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: () => {
+        const result = deleteSiteFolder(folder.id)
+        if (!result?.ok) {
+          message.warning(result?.reason || '文件夹删除失败')
+          return
+        }
+        if (folderFilter === folder.id) setFolderFilter(result.parentId || defaultSiteFolderId)
+        setExpandedFolderIds((ids) => ids.filter((id) => id !== folder.id))
+        message.success('文件夹已删除')
+      },
+    })
+  }
+
+  const makeDefaultFolder = (folder) => {
+    const result = setDefaultSiteFolder(folder.id)
+    if (!result?.ok) return message.warning(result?.reason || '默认文件夹设置失败')
+    message.success(`“${folder.name}”已设为默认文件夹`)
+  }
+
+  const openMoveToFolder = (row) => {
+    setMoveTargets([row])
+    setMoveFolderId(row.folderId || defaultSiteFolderId)
+  }
+
+  const openBatchMoveToFolder = () => {
+    if (!selectedSites.length) return
+    setMoveTargets(selectedSites)
+    const folderIds = new Set(selectedSites.map((site) => site.folderId || defaultSiteFolderId))
+    setMoveFolderId(folderIds.size === 1 ? selectedSites[0].folderId || defaultSiteFolderId : defaultSiteFolderId)
+  }
+
+  const submitMoveToFolder = () => {
+    if (!moveTargets.length) return
+    moveSitesToFolder(moveTargets.map((site) => site.host), moveFolderId || defaultSiteFolderId)
+    const movedCount = moveTargets.length
+    const movedIds = new Set(moveTargets.map((site) => site.id))
+    setMoveTargets([])
+    setSelectedSiteIds((ids) => ids.filter((id) => !movedIds.has(id)))
+    message.success(`${movedCount} 个网站已移动到文件夹`)
+  }
+
+  const batchAnalyzeSites = () => {
+    if (!selectedSites.length) return
+    const result = createSiteAnalysisBatch({
+      rows: selectedSites.map((site) => ({
+        siteName: site.name,
+        siteHost: site.host,
+        url: site.entryUrl || `https://${site.host}`,
+        folderId: site.folderId || defaultSiteFolderId,
+      })),
+      folderId: defaultSiteFolderId,
+      source: '网站管理批量分析',
+    })
+    setSelectedSiteIds([])
+    if (!result.created) {
+      message.info(result.reused ? '所选网站已有活动分析任务' : '所选网站无需重复创建分析任务')
+      return
+    }
+    message.success(`已创建 ${result.created} 个 AI 分析任务，任务将按并发上限排队执行`)
+  }
+
+  const batchSetEnabled = (enabled) => {
+    const changed = setSitesEnabled(selectedSites.map((site) => site.host), enabled)
+    setSelectedSiteIds([])
+    message.success(`已${enabled ? '启用' : '停用'} ${changed} 个网站`)
+  }
+
+  const resetImport = () => {
+    setImportMode('paste')
+    setImportText('')
+    setImportRows([])
+    setImportFileName('')
+    setImportLoading(false)
+  }
+
+  const openImport = () => {
+    resetImport()
+    setImportFolderId(siteFolders.some((folder) => folder.id === folderFilter) ? folderFilter : defaultSiteFolderId)
+    setImportOpen(true)
+  }
+
+  const closeImport = () => {
+    setImportOpen(false)
+    resetImport()
+  }
+
+  const updateImportText = (value) => {
+    setImportText(value)
+    setImportRows(resolveKnownSiteNames(pastedTextToSites(value), sites))
+    setImportFileName('')
+  }
+
+  const readImportFile = async (file) => {
+    setImportLoading(true)
+    try {
+      let matrix
+      if (file.name.toLowerCase().endsWith('.csv')) {
+        matrix = Papa.parse((await file.text()).replace(/^\uFEFF/, ''), { skipEmptyLines: true }).data
+      } else {
+        const module = await import('read-excel-file/browser')
+        const readXlsxFile = module.default || module
+        matrix = await readXlsxFile(file)
+      }
+      const rows = resolveKnownSiteNames(workbookRowsToSites(matrix), sites)
+      setImportRows(rows)
+      setImportFileName(file.name)
+      if (!rows.length) message.warning('文件中没有可识别的网站数据')
+    } catch {
+      setImportRows([])
+      setImportFileName('')
+      message.error('文件解析失败，请检查 CSV 或 XLSX 列格式')
+    } finally {
+      setImportLoading(false)
+    }
+    return false
+  }
+
+  const submitImport = () => {
+    const validRows = importRows.filter((row) => row.valid)
+    if (!validRows.length) {
+      message.warning('没有可导入的网站，请先检查 URL')
+      return
+    }
+    const rowsByHost = new Map()
+    validRows.forEach((row) => {
+      const host = getUrlHost(row.url)
+      const current = rowsByHost.get(host)
+      rowsByHost.set(host, {
+        ...(current || row),
+        name: current?.name || row.name,
+        url: current?.url || row.url,
+        entryUrls: [...new Set([...(current?.entryUrls || []), row.url])],
+        folderId: importFolderId,
+      })
+    })
+    const result = importSites([...rowsByHost.values()], importFileName || '网站管理手动导入')
+    setImportOpen(false)
+    resetImport()
+    setScope('全部')
+    setPage(1)
+    message.success(`网站导入完成：新增 ${result.created} 个，更新 ${result.updated} 个；未创建 AI 分析任务`)
+  }
+
+  const importColumns = [
+    {
+      title: '网站名称',
+      dataIndex: 'name',
+      width: 180,
+      render: (value) => value || <span className="site-import-name-pending">待识别网站</span>,
+    },
+    {
+      title: '网站 URL',
+      dataIndex: 'url',
+      render: (value) => <span className="mono site-import-url">{value || '—'}</span>,
+    },
+    {
+      title: '校验',
+      dataIndex: 'valid',
+      width: 84,
+      render: (value) => <span className={`site-import-validation ${value ? 'valid' : 'invalid'}`}>{value ? '可导入' : '需检查'}</span>,
+    },
+  ]
+
+  const folderTree = buildSiteFolderTree(siteFolders)
+  const folderTreeSelectData = toFolderTreeSelectData(siteFolders)
+  const folderParentTreeData = [{
+    key: ROOT_FOLDER_VALUE,
+    value: ROOT_FOLDER_VALUE,
+    title: '根目录',
+    children: folderTreeSelectData,
+  }]
+  const folderCount = (folderId) => {
+    const branchIds = getFolderBranchIds(siteFolders, folderId)
+    return registrySites.filter((site) => branchIds.has(site.folderId)).length
+  }
+  const toNavigationTreeData = (folders) => folders.map((folder) => ({
+    key: folder.id,
+    title: folder.name,
+    folder,
+    children: toNavigationTreeData(folder.children),
+  }))
+  const folderNavigationTreeData = toNavigationTreeData(folderTree)
 
   const columns = [
     {
@@ -215,8 +533,15 @@ export function SitesPage() {
     {
       title: '网站',
       dataIndex: 'name',
-      width: screens.sm ? 250 : 184,
-      render: (_, row) => <SourceCell name={row.name} host={row.host} onClick={() => openSite(row)} ariaLabel={`查看 ${row.name} 概览`} />,
+      width: screens.sm ? 190 : 168,
+      render: (_, row) => <SourceCell name={row.name} onClick={() => openSite(row)} ariaLabel={`查看 ${row.name} 概览`} />,
+    },
+    {
+      title: '域名',
+      dataIndex: 'host',
+      width: 190,
+      responsive: ['sm'],
+      render: (value) => <span className="mono table-domain-cell" title={value}>{value}</span>,
     },
     {
       title: '状态',
@@ -233,10 +558,18 @@ export function SitesPage() {
       render: (value) => <StatusTag value={value} />,
     },
     {
-      title: '采集规则',
-      width: 150,
+      title: '规则版本',
+      dataIndex: 'ruleVersion',
+      width: 100,
       responsive: ['md'],
-      render: (_, row) => <div className="site-rule-cell"><strong className="mono">{row.ruleVersion}</strong><StatusTag value={row.ruleStatus} /></div>,
+      render: (value) => <span className="mono">{value}</span>,
+    },
+    {
+      title: '规则状态',
+      dataIndex: 'ruleStatus',
+      width: 100,
+      responsive: ['md'],
+      render: (value) => <StatusTag value={value} />,
     },
     {
       title: '累计数据',
@@ -249,18 +582,21 @@ export function SitesPage() {
     {
       title: '操作',
       align: 'right',
-      width: screens.sm ? 148 : 112,
+      width: screens.sm ? 96 : 104,
       fixed: screens.sm ? 'right' : undefined,
       render: (_, row) => <RowActions
-        primary={{ label: primaryActionLabel(row), onClick: () => primaryAction(row) }}
-        moreLabel={`${row.name} 更多操作`}
-        menu={[{ key: 'rule', icon: <CodeOutlined />, label: '网站规则', onClick: () => navigate(getSiteRulePath(row.host)) }]}
+        className="site-row-actions"
+        primary={workflowAction(row)}
+        reservePrimary
+        moreLabel="更多"
+        menu={managementMenu(row)}
       />,
     },
   ]
 
   const start = visibleRows.length ? (page - 1) * PAGE_SIZE + 1 : 0
   const end = Math.min(page * PAGE_SIZE, visibleRows.length)
+  const importableCount = new Set(importRows.filter((row) => row.valid).map((row) => getUrlHost(row.url))).size
 
   return (
     <div className="page-content sites-page">
@@ -276,26 +612,102 @@ export function SitesPage() {
         ))}
       </section>
 
-      <div className="site-toolbar">
-        <Segmented
-          className="site-status-filter"
-          value={scope}
-          onChange={setScope}
-          options={['全部', '可采集', '待分析', '分析中', '待审核', '需处理', '已停用']}
-        />
-        <div className="toolbar-spacer" />
-        <Tooltip title="列表视图或卡片视图">
-          <Segmented
-            className="site-view-toggle"
-            value={view}
-            onChange={setView}
-            options={[
-              { value: 'list', icon: <UnorderedListOutlined />, 'aria-label': '列表视图' },
-              { value: 'grid', icon: <AppstoreOutlined />, 'aria-label': '卡片视图' },
-            ]}
-          />
-        </Tooltip>
-      </div>
+      <div className="site-management-workspace">
+        <aside className="site-folder-panel" aria-label="网站文件夹">
+          <header>
+            <strong>文件夹</strong>
+            <Tooltip title="新建文件夹">
+              <Button type="text" size="small" aria-label="新建网站文件夹" icon={<FolderAddOutlined />} onClick={() => openCreateFolder()} />
+            </Tooltip>
+          </header>
+          <div className="site-folder-list">
+            <button type="button" className={folderFilter === 'all' ? 'active' : ''} onClick={() => setFolderFilter('all')}>
+              <FolderOpenOutlined /><span>全部网站</span><b>{registrySites.length}</b>
+            </button>
+            <Tree
+              className="site-folder-tree"
+              blockNode
+              treeData={folderNavigationTreeData}
+              selectedKeys={siteFolders.some((folder) => folder.id === folderFilter) ? [folderFilter] : []}
+              expandedKeys={expandedFolderIds}
+              onExpand={setExpandedFolderIds}
+              onSelect={(keys) => keys[0] && setFolderFilter(keys[0])}
+              titleRender={({ folder }) => (
+                <div className="site-folder-tree-title" title={getFolderPath(siteFolders, folder.id)}>
+                  <FolderOutlined />
+                  <span className="site-folder-name">{folder.name}</span>
+                  {folder.isDefault && <em>默认</em>}
+                  <b>{folderCount(folder.id)}</b>
+                  <span className="site-folder-tree-more" onClick={(event) => event.stopPropagation()}>
+                    <Dropdown
+                      trigger={['click']}
+                      placement="bottomRight"
+                      menu={{ items: [
+                        { key: 'child', icon: <FolderAddOutlined />, label: '新建子文件夹', onClick: () => openCreateFolder(folder.id) },
+                        { key: 'rename', icon: <EditOutlined />, label: '重命名', onClick: () => openRenameFolder(folder) },
+                        { key: 'default', icon: <StarOutlined />, label: '设为默认文件夹', disabled: folder.isDefault, onClick: () => makeDefaultFolder(folder) },
+                        { key: 'delete', icon: <DeleteOutlined />, label: '删除文件夹', danger: true, disabled: folder.isDefault, onClick: () => confirmDeleteFolder(folder) },
+                      ] }}
+                    >
+                      <Tooltip title="更多">
+                        <Button type="text" size="small" aria-label={`${folder.name} 文件夹操作`} icon={<MoreOutlined />} />
+                      </Tooltip>
+                    </Dropdown>
+                  </span>
+                </div>
+              )}
+            />
+          </div>
+        </aside>
+
+        <div className="site-list-workspace">
+          <div className={`site-toolbar ${selectedSites.length ? 'selection-mode' : ''}`}>
+            {selectedSites.length ? (
+              <div className="site-selection-toolbar">
+                <div className="site-selection-summary">
+                  <span className="site-selection-check"><CheckOutlined /></span>
+                  <strong>已选择 {selectedSites.length} 个网站</strong>
+                  <Button type="link" size="small" onClick={() => setSelectedSiteIds([])}>取消选择</Button>
+                </div>
+                <div className="site-selection-actions">
+                  <Button icon={<FolderOutlined />} onClick={openBatchMoveToFolder}>移动</Button>
+                  <Button type="primary" icon={<RobotOutlined />} onClick={batchAnalyzeSites}>AI 分析</Button>
+                  <Dropdown
+                    trigger={['click']}
+                    placement="bottomRight"
+                    menu={{ items: [
+                      { key: 'enable', icon: <CheckCircleOutlined />, label: '启用网站', onClick: () => batchSetEnabled(true) },
+                      { key: 'disable', icon: <StopOutlined />, label: '停用网站', onClick: () => batchSetEnabled(false) },
+                    ] }}
+                  >
+                    <Button icon={<MoreOutlined />}>更多</Button>
+                  </Dropdown>
+                </div>
+              </div>
+            ) : (
+              <>
+                <Segmented
+                  className="site-status-filter"
+                  value={scope}
+                  onChange={setScope}
+                  options={Object.keys(SITE_SCOPE_STATUSES)}
+                />
+                <div className="toolbar-spacer" />
+                <Tooltip title="列表视图或卡片视图">
+                  <Segmented
+                    className="site-view-toggle"
+                    value={view}
+                    onChange={setView}
+                    options={[
+                      { value: 'list', icon: <UnorderedListOutlined />, 'aria-label': '列表视图' },
+                      { value: 'grid', icon: <AppstoreOutlined />, 'aria-label': '卡片视图' },
+                    ]}
+                  />
+                </Tooltip>
+                <Button type="primary" icon={<UploadOutlined />} onClick={openImport}>导入网站</Button>
+              </>
+            )}
+          </div>
 
       {view === 'list' ? (
         <div className="sites-table-surface">
@@ -306,7 +718,13 @@ export function SitesPage() {
             dataSource={pagedRows}
             pagination={false}
             tableLayout="fixed"
-            scroll={{ x: screens.sm ? 950 : 296 }}
+            scroll={{ x: screens.sm ? 1110 : 320 }}
+            rowSelection={{
+              selectedRowKeys: selectedSiteIds,
+              onChange: (keys) => setSelectedSiteIds(keys),
+              preserveSelectedRowKeys: true,
+              columnWidth: 48,
+            }}
           />
         </div>
       ) : (
@@ -314,25 +732,23 @@ export function SitesPage() {
           {pagedRows.map((row) => (
             <article className="site-card" key={row.id}>
               <div className="site-card-head">
-                <SourceCell name={row.name} host={row.host} onClick={() => openSite(row)} ariaLabel={`查看 ${row.name} 概览`} />
+                <SourceCell name={row.name} onClick={() => openSite(row)} ariaLabel={`查看 ${row.name} 概览`} />
                 <StatusTag value={row.status} />
               </div>
               <div className="site-card-stats">
+                <div><span>域名</span><b className="mono">{row.host}</b></div>
                 <div><span>访问健康</span><b>{row.accessHealth}</b></div>
                 <div><span>规则版本</span><b className="mono">{row.ruleVersion}</b></div>
-                <div><span>关联计划</span><b>{row.taskCount} 个</b></div>
               </div>
               <div className="site-card-actions">
-                <Button
-                  type={row.status === '需处理' ? 'primary' : 'default'}
-                  danger={row.status === '需处理'}
-                  icon={row.analysisEntry || ['待分析', '分析中', '待审核'].includes(row.status) ? <RobotOutlined /> : <SettingOutlined />}
-                  onClick={() => primaryAction(row)}
-                >
-                  {primaryActionLabel(row)}
-                </Button>
-                <Tooltip title="网站概览"><Button aria-label={`查看 ${row.name} 概览`} icon={<InfoCircleOutlined />} onClick={() => openSite(row)} /></Tooltip>
-                <Tooltip title="网站规则"><Button aria-label={`查看 ${row.name} 规则`} icon={<CodeOutlined />} onClick={() => navigate(getSiteRulePath(row.host))} /></Tooltip>
+                {(() => {
+                  const action = workflowAction(row)
+                  if (!action) return null
+                  return <Button className="site-card-primary-action" type={row.status === '需处理' ? 'primary' : 'default'} danger={row.status === '需处理'} icon={<RobotOutlined />} onClick={action.onClick}>{action.label}</Button>
+                })()}
+                <Dropdown trigger={['click']} placement="bottomRight" menu={{ items: managementMenu(row) }}>
+                  <Tooltip title="更多"><Button aria-label="更多" icon={<MoreOutlined />} /></Tooltip>
+                </Dropdown>
               </div>
             </article>
           ))}
@@ -350,27 +766,140 @@ export function SitesPage() {
           onChange={setPage}
         />
       </div>
+        </div>
+      </div>
 
       <Modal
-        title={selected ? `${selected.name} · 网站概览` : '网站概览'}
-        open={Boolean(selected)}
-        onCancel={closeSite}
-        width={760}
-        footer={<Space><Button onClick={closeSite}>关闭</Button>{analysisHistoryCounts.get(selected?.host) > 0 && <Button icon={<HistoryOutlined />} onClick={() => navigate(`/ai/history?site=${encodeURIComponent(selected?.host || '')}`)}>分析记录 {analysisHistoryCounts.get(selected?.host)}</Button>}<Button icon={<CodeOutlined />} onClick={() => navigate(getSiteRulePath(selected?.host || ''))}>网站规则</Button><Button type="primary" onClick={() => {
-          if (selected?.analysisEntry || ['待分析', '分析中', '待审核'].includes(selected?.status)) openAnalysis(selected)
-          else navigate(selectedTask ? `/tasks?site=${encodeURIComponent(selected?.host || '')}` : `/tasks?site=${encodeURIComponent(selected?.host || '')}&create=1`)
-        }}>{selected?.analysisEntry ? '查看分析' : ['待分析', '分析中', '待审核'].includes(selected?.status) ? '发起 AI 分析' : selectedTask ? '查看采集计划' : '创建采集计划'}</Button></Space>}
+        className="site-import-modal"
+        title="导入网站"
+        open={importOpen}
+        onCancel={closeImport}
+        width={720}
+        footer={[
+          <Button key="cancel" onClick={closeImport}>取消</Button>,
+          <Button key="submit" type="primary" disabled={!importableCount || importLoading} onClick={submitImport}>导入 {importableCount} 个网站</Button>,
+        ]}
       >
-        {selected && <div className="site-overview-modal"><Descriptions column={{ xs: 1, sm: 2 }} items={[
-            { key: 'name', label: '网站名称', children: selected.name },
-            { key: 'url', label: '网站 URL', children: <span className="mono">{selectedRule?.entryUrl || selected.entryUrl || `https://${selected.host}`}</span> },
-            { key: 'status', label: '接入状态', children: <StatusTag value={selected.status} /> },
-            { key: 'health', label: '访问健康', children: <StatusTag value={selected.accessHealth} /> },
-            { key: 'records', label: '累计数据', children: selected.records },
-            { key: 'rule', label: '规则状态', children: selectedRule ? <><span className="mono">{selectedRule.id} · {selectedRule.version}</span> <StatusTag value={selectedRule.status} /></> : <StatusTag value="待配置" /> },
-            { key: 'tasks', label: '关联计划', children: `${selectedTasks.length} 个` },
-            { key: 'import', label: '资产来源', children: selected.importSource ? `${selected.importSource} · ${selected.importedAt || '刚刚'}` : '已有网站资产' },
-          ]} /><Alert className="site-health-alert" type={selected.status === '需处理' ? 'error' : selected.analysisEntry ? 'info' : selectedRule ? 'success' : 'warning'} showIcon title={selected.status === '需处理' ? '网站访问或采集规则需要处理，但不会改变已有采集计划和执行记录。' : selected.analysisEntry ? '该网站已有活动分析任务，可前往 AI 分析继续处理。' : selectedRule ? '该网站资产的 URL、访问方式和采集规则已经就绪。' : '网站资产已入库，尚未创建 AI 分析任务。'} /></div>}
+        <Alert
+          className="site-import-note"
+          type="info"
+          showIcon
+          title="仅导入网站资产，不会创建 AI 分析任务"
+          description="未填写网站名称时保留为“待识别网站”，不会使用域名代替名称。"
+        />
+        <label className="site-import-folder">
+          <span>导入到文件夹</span>
+          <FolderTreeSelect
+            folders={siteFolders}
+            createFolder={createSiteFolder}
+            value={importFolderId || defaultSiteFolderId}
+            treeData={folderTreeSelectData}
+            treeDefaultExpandAll
+            showSearch
+            treeNodeFilterProp="title"
+            onChange={setImportFolderId}
+          />
+        </label>
+        <Segmented
+          block
+          className="site-import-mode"
+          value={importMode}
+          options={[{ value: 'paste', label: '粘贴导入' }, { value: 'file', label: '文件导入' }]}
+          onChange={(value) => {
+            setImportMode(value)
+            setImportRows(value === 'paste' ? resolveKnownSiteNames(pastedTextToSites(importText), sites) : [])
+            setImportFileName('')
+          }}
+        />
+        {importMode === 'paste' ? (
+          <div className="site-import-paste">
+            <Input.TextArea
+              value={importText}
+              onChange={(event) => updateImportText(event.target.value)}
+              placeholder={'每行一个 URL，也可填写“网站名称,URL”\nhttps://example.com/notices\n示例采购网,https://procurement.example.com/list'}
+              autoSize={{ minRows: 6, maxRows: 10 }}
+              spellCheck={false}
+            />
+            <span>支持批量粘贴；同一域名将合并为一个网站资产。</span>
+          </div>
+        ) : (
+          <Upload.Dragger
+            className="site-import-upload"
+            accept=".csv,.xlsx"
+            maxCount={1}
+            showUploadList={false}
+            beforeUpload={readImportFile}
+          >
+            <p className="ant-upload-drag-icon"><InboxOutlined /></p>
+            <p className="ant-upload-text">{importLoading ? '正在解析文件' : importFileName || '选择 CSV 或 XLSX 文件'}</p>
+            <p className="ant-upload-hint">列：网站名称、网站 URL，采集频率可选</p>
+          </Upload.Dragger>
+        )}
+        {importRows.length > 0 && (
+          <section className="site-import-preview">
+            <header><strong>导入预览</strong><span>{importableCount} 个可导入</span></header>
+            <Table rowKey="key" size="small" columns={importColumns} dataSource={importRows.slice(0, 8)} pagination={false} scroll={{ x: 620 }} />
+          </section>
+        )}
+      </Modal>
+
+      <Modal
+        title={folderDialog?.mode === 'rename' ? '重命名文件夹' : '新建文件夹'}
+        open={Boolean(folderDialog)}
+        onCancel={() => setFolderDialog(null)}
+        onOk={saveFolder}
+        okText={folderDialog?.mode === 'rename' ? '保存' : '创建'}
+        width={420}
+      >
+        <div className="site-folder-dialog-fields">
+          <label>
+            <span>文件夹名称</span>
+            <Input
+              autoFocus
+              maxLength={30}
+              value={folderName}
+              placeholder="输入文件夹名称"
+              onChange={(event) => setFolderName(event.target.value)}
+              onPressEnter={saveFolder}
+            />
+          </label>
+          {folderDialog?.mode === 'create' && (
+            <label>
+              <span>上级文件夹</span>
+              <TreeSelect
+                value={folderParentId}
+                treeData={folderParentTreeData}
+                treeDefaultExpandAll
+                showSearch
+                treeNodeFilterProp="title"
+                onChange={setFolderParentId}
+              />
+            </label>
+          )}
+        </div>
+      </Modal>
+
+      <Modal
+        title={moveTargets.length === 1 ? `移动 ${moveTargets[0].name}` : `移动 ${moveTargets.length} 个网站`}
+        open={moveTargets.length > 0}
+        onCancel={() => setMoveTargets([])}
+        onOk={submitMoveToFolder}
+        okText="移动"
+        width={440}
+      >
+        <label className="site-move-folder-field">
+          <span>目标文件夹</span>
+          <FolderTreeSelect
+            folders={siteFolders}
+            createFolder={createSiteFolder}
+            value={moveFolderId || defaultSiteFolderId}
+            treeData={folderTreeSelectData}
+            treeDefaultExpandAll
+            showSearch
+            treeNodeFilterProp="title"
+            onChange={setMoveFolderId}
+          />
+        </label>
       </Modal>
 
     </div>

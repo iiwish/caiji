@@ -3,10 +3,10 @@ import { Alert, Button, DatePicker, Grid, Input, Modal, Select, Table } from 'an
 import { CalendarOutlined, ClearOutlined, DatabaseOutlined, GlobalOutlined, SearchOutlined, ToolOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { useNavigate, useOutletContext, useParams, useSearchParams } from 'react-router-dom'
-import { RowActions, SectionCard, SourceCell, StatusTag } from '../components/ConsoleUI'
+import { EntityLink, RowActions, SectionCard, StatusTag } from '../components/ConsoleUI'
 import { usePrototype } from '../app/PrototypeContext'
 import { recordDetails } from '../data'
-import { getSiteRulePath } from '../app/routes'
+import { getSiteRulePath, getSiteWorkspacePath } from '../app/routes'
 
 const { RangePicker } = DatePicker
 
@@ -175,9 +175,10 @@ function ExecutionsList({ initialExecution }) {
   const { search } = useOutletContext()
   const [params] = useSearchParams()
   const screens = Grid.useBreakpoint()
-  const { executions, tasks } = usePrototype()
+  const { executions, tasks, sites } = usePrototype()
   const statusParam = params.get('status')
-  const [siteFilter, setSiteFilter] = useState()
+  const siteParam = params.get('site')
+  const [siteFilter, setSiteFilter] = useState(siteParam || undefined)
   const [typeFilter, setTypeFilter] = useState()
   const [statusFilter, setStatusFilter] = useState(statusParam || undefined)
   const [dateRange, setDateRange] = useState(null)
@@ -198,7 +199,7 @@ function ExecutionsList({ initialExecution }) {
         && !executionDate.isBefore(dateRange[0].startOf('day'))
         && !executionDate.isAfter(dateRange[1].endOf('day'))
     })())
-    && `${row.id}${getBatchId(row)}${row.task}${row.site}${row.url}`.toLowerCase().includes(search.trim().toLowerCase())
+    && `${row.id}${getBatchId(row)}${row.site}采集计划${row.site}${row.url}`.toLowerCase().includes(search.trim().toLowerCase())
   )), [executions, tasks, search, siteFilter, typeFilter, statusFilter, dateRange])
 
   const siteOptions = useMemo(() => [...new Set(executionRows.map((row) => row.site))].map((value) => ({ value, label: value })), [executionRows])
@@ -210,6 +211,10 @@ function ExecutionsList({ initialExecution }) {
   }, [statusParam])
 
   useEffect(() => {
+    setSiteFilter(siteParam || undefined)
+  }, [siteParam])
+
+  useEffect(() => {
     setSelectedExecution(initialExecution || null)
   }, [initialExecution])
 
@@ -218,10 +223,14 @@ function ExecutionsList({ initialExecution }) {
     setTypeFilter(undefined)
     setStatusFilter(undefined)
     setDateRange(null)
-    if (statusParam) navigate('/executions', { replace: true })
+    if (statusParam || siteParam) navigate('/executions', { replace: true })
   }
 
   const openDetails = (row) => setSelectedExecution(row)
+  const getExecutionSite = (row) => {
+    const task = tasks.find((item) => item.id === row.taskId)
+    return sites.find((site) => site.id === row.siteId || site.id === task?.siteId || site.name === row.site || site.name === task?.site)
+  }
   const closeDetails = () => {
     setSelectedExecution(null)
     if (initialExecution) navigate('/executions', { replace: true })
@@ -230,15 +239,21 @@ function ExecutionsList({ initialExecution }) {
   const renderActions = (row) => {
     const menuItems = [
       ...(isRuleFailure(row) ? [{ key: 'repair-rule', icon: <ToolOutlined />, label: '修复网站规则', onClick: () => navigate(getExecutionRulePath(row, true)) }] : []),
-      { key: 'task', icon: <CalendarOutlined />, label: '查看采集计划', onClick: () => navigate(`/tasks?task=${row.taskId}`) },
-      { key: 'rule', icon: <GlobalOutlined />, label: '查看网站规则', onClick: () => navigate(getExecutionRulePath(row)) },
+      { key: 'task', icon: <CalendarOutlined />, label: '查看采集计划', onClick: () => {
+        const site = getExecutionSite(row)
+        navigate(site ? getSiteWorkspacePath(site, 'plan') : `/tasks?task=${row.taskId}`)
+      } },
+      { key: 'rule', icon: <GlobalOutlined />, label: '查看采集规则', onClick: () => {
+        const site = getExecutionSite(row)
+        navigate(site ? getSiteWorkspacePath(site, 'rule') : getExecutionRulePath(row))
+      } },
     ]
     return <RowActions menu={menuItems} moreLabel={`${getBatchId(row)} 更多操作`} />
   }
 
   const columns = [
-    { title: '批次 ID', dataIndex: 'id', width: 132, render: (_, row) => <Button type="link" className="execution-batch-link mono" onClick={() => openDetails(row)}>{getBatchId(row)}</Button> },
-    { title: '数据源', width: 215, render: (_, row) => <SourceCell name={row.site} host={row.task} /> },
+    { title: '批次 ID', dataIndex: 'id', width: 148, render: (_, row) => <EntityLink title={getBatchId(row)} titleClassName="mono" onClick={() => openDetails(row)} ariaLabel={`查看批次 ${getBatchId(row)}`} /> },
+    { title: '网站', dataIndex: 'site', width: 215, render: (value) => <span className="table-single-value" title={value}>{value}</span> },
     { title: '采集类型', dataIndex: 'collectionType', width: 112, render: (value) => <span className={`collection-mode-tag ${value.includes('全量') ? 'full' : 'incremental'}`}>{value}</span> },
     { title: '采集量', dataIndex: 'articles', width: 90, align: 'right', render: (value) => <span className="mono value-strong">{value.toLocaleString()}</span> },
     { title: '耗时', dataIndex: 'duration', width: 82, align: 'right', render: (value) => <span className="mono muted execution-duration">{value}</span> },
@@ -249,7 +264,7 @@ function ExecutionsList({ initialExecution }) {
 
   return (
     <div className="page-content execution-records-page">
-      {statusParam && <Alert className="context-filter-alert" type="info" showIcon closable onClose={() => navigate('/executions')} title={`已从关联入口带入筛选：${statusParam}`} />}
+      {(statusParam || siteParam) && <Alert className="context-filter-alert" type="info" showIcon closable onClose={() => navigate('/executions')} title={`已从关联入口带入筛选：${siteParam || statusParam}`} />}
       <div className="records-toolbar">
         <div className="records-filters" aria-label="采集记录筛选">
           <Select aria-label="按数据源筛选" allowClear value={siteFilter} placeholder="全部数据源" options={siteOptions} onChange={setSiteFilter} />
@@ -265,8 +280,8 @@ function ExecutionsList({ initialExecution }) {
           <div className="execution-mobile-list">
             {visible.map((row) => (
               <article className="execution-mobile-item" key={row.id}>
-                <div className="execution-mobile-head"><button className="execution-mobile-id mono" onClick={() => openDetails(row)}>{getBatchId(row)}</button><StatusTag value={row.status} /></div>
-                <div className="execution-mobile-source"><strong>{row.site}</strong><span>{row.task}</span></div>
+                <div className="execution-mobile-head"><EntityLink className="execution-mobile-id" title={getBatchId(row)} titleClassName="mono" onClick={() => openDetails(row)} ariaLabel={`查看批次 ${getBatchId(row)}`} /><StatusTag value={row.status} /></div>
+                <div className="execution-mobile-source"><strong>{row.site}</strong></div>
                 <dl>
                   <div><dt>采集类型</dt><dd>{getExecutionType(row, tasks)}</dd></div>
                   <div><dt>入库原文</dt><dd className="mono value-strong">{row.articles.toLocaleString()}</dd></div>
@@ -289,7 +304,10 @@ function ExecutionsList({ initialExecution }) {
         open={Boolean(selectedExecution)}
         onClose={closeDetails}
         onRepairRule={(row) => navigate(getExecutionRulePath(row, true))}
-        onViewTask={(row) => navigate(`/tasks?task=${row.taskId}`)}
+        onViewTask={(row) => {
+          const site = getExecutionSite(row)
+          navigate(site ? getSiteWorkspacePath(site, 'plan') : `/tasks?task=${row.taskId}`)
+        }}
       />
     </div>
   )

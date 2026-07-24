@@ -13,7 +13,6 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   ReadOutlined,
-  ScheduleOutlined,
   SettingOutlined,
   WarningOutlined,
 } from '@ant-design/icons'
@@ -27,9 +26,9 @@ const pageMeta = {
   dashboard: ['采集仪表盘', '实时监控全平台采集运行状况', '搜索批次、数据源…'],
   ai: ['AI 分析', '创建、审核并追溯网站分析任务', '搜索分析任务、网站或 URL…'],
   sites: ['网站管理', '管理全部导入网站及其接入状态', '搜索网站名称、URL…'],
-  tasks: ['采集管理', '管理采集计划、调度策略和运行参数', '搜索采集计划、网站或计划 ID…'],
+  tasks: ['采集配置', '为网站维护采集策略、调度参数和访问配置', '搜索采集计划、网站或计划 ID…'],
   executions: ['采集记录', '查看每次生产执行的事实、问题和产物', '搜索批次 ID、采集计划、网站或 URL…'],
-  failures: ['失败队列', '排查采集失败的页面与错误原因', '搜索失败页面、错误码…'],
+  failures: ['失败队列', '自动重试可恢复故障，集中诊断人工问题', '搜索失败页面、错误码…'],
   articles: ['原文库', '查看入库原文、质量状态和来源追溯', '搜索标题、原文编码、URL 或网站…'],
   capabilities: ['Skill 能力', '管理跨网站复用的生成与修复策略', '搜索能力名称或版本…'],
   manual: ['操作手册', '查看故障修复与网站接入的完整操作链路', ''],
@@ -48,8 +47,15 @@ function getFocusedWorkspaceMeta(location) {
       ? ['历史分析详情', '查看已归档的分析结果与发布配置', '']
       : ['历史分析记录', '查询已完成的分析、规则版本和来源链路', '搜索历史记录、网站或 URL…']
   }
-  if (segments[0] === 'sites' && segments[2] === 'rule') {
-    return ['网站规则', '维护采集规则、回归结果和发布版本']
+  if (segments[0] === 'sites' && segments[1]) {
+    const section = segments[2] || 'overview'
+    const sectionMeta = {
+      overview: ['网站概览', '查看网站资产、接入状态和当前待办'],
+      plan: ['采集计划', '维护采集策略、调度参数和访问配置'],
+      rule: ['采集规则', '维护字段规则、回归结果和发布版本'],
+      executions: ['网站运行记录', '查看当前网站的采集批次和执行结果'],
+    }
+    return sectionMeta[section] || sectionMeta.overview
   }
   if (segments[0] === 'capabilities' && segments[1]) {
     return ['Skill 能力维护', '编辑能力文档、运行回归并发布候选版本']
@@ -73,13 +79,14 @@ export function AppShell() {
   const [search, setSearch] = useState('')
   const searchRef = useRef(null)
   const workspace = getWorkspace(location.pathname)
+  const navigationWorkspace = workspace === 'tasks' ? 'sites' : workspace
   const focusedMeta = getFocusedWorkspaceMeta(location)
   const meta = focusedMeta || pageMeta[workspace] || pageMeta.dashboard
   const failureCount = 37
   const activeAnalysisEntries = intakeBatches
     .flatMap((batch) => batch.urls)
     .filter((entry) => !['审核完成', '已通过', '已完成', '已取消'].includes(entry.status))
-  const intakeNeedsHandling = activeAnalysisEntries.filter((entry) => entry.status !== '分析中').length
+  const intakeNeedsHandling = activeAnalysisEntries.filter((entry) => !['分析中', '排队中'].includes(entry.status)).length
 
   useEffect(() => {
     setSearch('')
@@ -110,7 +117,6 @@ export function AppShell() {
     { type: 'group', label: '数据接入', children: [
       { key: 'ai', icon: <FileSearchOutlined />, label: <span className="nav-label">AI 分析<Badge count={intakeNeedsHandling} /></span>, title: 'AI 分析', 'aria-label': 'AI 分析' },
       { key: 'sites', icon: <GlobalOutlined />, label: '网站管理', title: '网站管理', 'aria-label': '网站管理' },
-      { key: 'tasks', icon: <ScheduleOutlined />, label: '采集管理', title: '采集管理', 'aria-label': '采集管理' },
     ] },
     { type: 'group', label: '运行管理', children: [
       { key: 'executions', icon: <HistoryOutlined />, label: '采集记录', title: '采集记录', 'aria-label': '采集记录' },
@@ -141,7 +147,7 @@ export function AppShell() {
           className="nav-menu"
           theme="dark"
           mode="inline"
-          selectedKeys={[workspace]}
+          selectedKeys={[navigationWorkspace]}
           items={navItems}
           onClick={({ key }) => navigate(`/${key}`)}
         />

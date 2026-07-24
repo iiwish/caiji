@@ -7,7 +7,7 @@ import { PrototypeProvider } from './app/PrototypeContext'
 const DashboardPage = lazy(() => import('./pages/DashboardPage').then((module) => ({ default: module.DashboardPage })))
 const AiAnalysisPage = lazy(() => import('./pages/AiAnalysisPage').then((module) => ({ default: module.AiAnalysisPage })))
 const SitesPage = lazy(() => import('./pages/SitesPage').then((module) => ({ default: module.SitesPage })))
-const SiteRulePage = lazy(() => import('./pages/SiteRulePage').then((module) => ({ default: module.SiteRulePage })))
+const SiteWorkspacePage = lazy(() => import('./pages/SiteWorkspacePage').then((module) => ({ default: module.SiteWorkspacePage })))
 const TasksPage = lazy(() => import('./pages/TasksPage').then((module) => ({ default: module.TasksPage })))
 const ExecutionsPage = lazy(() => import('./pages/ExecutionsPage').then((module) => ({ default: module.ExecutionsPage })))
 const FailuresPage = lazy(() => import('./pages/FailuresPage').then((module) => ({ default: module.FailuresPage })))
@@ -32,7 +32,7 @@ export default function App() {
             <Route path="ai" element={<AiAnalysisPage />} />
             <Route path="ai/history" element={<AiAnalysisPage />} />
             <Route path="sites" element={<SitesPage />} />
-            <Route path="sites/:siteHost/rule" element={<SiteRulePage />} />
+            <Route path="sites/:siteId/:section?" element={<SiteWorkspacePage />} />
             <Route path="rules" element={<Navigate to="/sites" replace />} />
             <Route path="rules/:ruleId" element={<Navigate to="/sites" replace />} />
             <Route path="tasks" element={<TasksPage />} />

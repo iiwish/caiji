@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Alert, App as AntApp, Button, Empty, Form, Input, Modal, Progress, Segmented, Select, Table, Tooltip, Upload } from 'antd'
+import { Alert, App as AntApp, Button, Empty, Form, Input, Modal, Pagination, Progress, Segmented, Select, Table, Tooltip, Upload } from 'antd'
 import {
   ArrowLeftOutlined,
   CaretRightOutlined,
@@ -12,15 +12,21 @@ import {
   ExpandAltOutlined,
   HistoryOutlined,
   InboxOutlined,
+  PauseOutlined,
+  PlayCircleOutlined,
   PlusOutlined,
   ReloadOutlined,
   RobotOutlined,
   RocketOutlined,
+  StopOutlined,
 } from '@ant-design/icons'
 import { useLocation, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
 import Papa from 'papaparse'
 import { RowActions, SourceCell, StatusTag } from '../components/ConsoleUI'
-import { usePrototype } from '../app/PrototypeContext'
+import { FolderTreeSelect } from '../components/FolderTreeSelect'
+import { ANALYSIS_CONCURRENCY_LIMIT, usePrototype } from '../app/PrototypeContext'
+import { getFolderPath, toFolderTreeSelectData } from '../app/siteFolderModel'
+import { getSiteWorkspacePath } from '../app/routes'
 
 const hubeiSamples = [
   '关于市中心医院医疗设备采购项目的公开招标公告',
@@ -29,6 +35,7 @@ const hubeiSamples = [
   '省属高校实验设备定点采购项目询价公告',
   '智慧交通信号控制系统升级改造项目招标',
 ]
+const QUEUE_PAGE_SIZE = 20
 
 const analysisProfiles = {
   'ggzy.hubei.gov.cn': {
@@ -220,11 +227,17 @@ export function AiAnalysisPage() {
     intakeBatches,
     rules,
     sites,
+    siteFolders,
+    defaultSiteFolderId,
     tasks,
     executions,
     updateBatchUrl,
     approveBatchUrl,
     importSites,
+    createSiteFolder,
+    createSiteAnalysisBatch,
+    setAnalysisBatchPaused,
+    cancelAnalysisEntry,
     startSiteAnalysis,
     runTask,
   } = usePrototype()
@@ -235,6 +248,7 @@ export function AiAnalysisPage() {
   const isHistoryView = location.pathname === '/ai/history'
   const [selectedUrlId, setSelectedUrlId] = useState(entryFilter || '')
   const [historyType, setHistoryType] = useState('全部类型')
+  const [queuePage, setQueuePage] = useState(1)
   const [createOpen, setCreateOpen] = useState(false)
   const [createMode, setCreateMode] = useState('new')
   const [createFileName, setCreateFileName] = useState('')
@@ -254,8 +268,10 @@ export function AiAnalysisPage() {
     batchId: batch.id,
     batchName: batch.name,
     createdAt: batch.createdAt,
-    readyAt: batch.readyAt,
+    readyAt: url.readyAt || batch.readyAt,
     updatedAt: batch.updatedAt,
+    batchPaused: Boolean(batch.paused),
+    batchConcurrency: batch.concurrency || 1,
     urlIndex,
   }))).sort((left, right) => {
     const timestamp = (entry) => {
@@ -283,6 +299,16 @@ export function AiAnalysisPage() {
     const matchesSearch = `${entry.site}${entry.url}${entry.batchName}${entry.status}${entry.ruleId || ''}${entry.releaseVersion || ''}`.toLowerCase().includes(search.toLowerCase())
     return matchesType && matchesSite && matchesSearch
   }), [historicalEntries, historyType, search, siteFilter])
+
+  useEffect(() => {
+    setQueuePage(1)
+  }, [search])
+
+  useEffect(() => {
+    const lastPage = Math.max(1, Math.ceil(visibleEntries.length / QUEUE_PAGE_SIZE))
+    if (queuePage > lastPage) setQueuePage(lastPage)
+  }, [queuePage, visibleEntries.length])
+
   const requestedEntry = allEntries.find((entry) => entry.id === (entryFilter || (isHistoryView ? '' : selectedUrlId)))
   const selected = requestedEntry
     || (isHistoryView ? null : activeEntries.find((entry) => entry.id === selectedUrlId || entry.id === entryFilter) || activeEntries[0])
@@ -291,7 +317,11 @@ export function AiAnalysisPage() {
   const activeHosts = useMemo(() => new Set(occupiedAnalysisEntries.map((entry) => normalizeHost(getHost(entry.url)))), [occupiedAnalysisEntries])
   const availableSites = useMemo(() => sites
     .filter((site) => site.host && !activeHosts.has(normalizeHost(site.host)))
-    .map((site) => ({ value: site.id || site.host, label: `${site.name} · ${site.host}` })), [activeHosts, sites])
+    .map((site) => {
+      const folderPath = getFolderPath(siteFolders, site.folderId)
+      return { value: site.id || site.host, label: `${site.name} · ${site.host}${folderPath ? ` · ${folderPath}` : ''}` }
+    }), [activeHosts, siteFolders, sites])
+  const folderTreeSelectData = useMemo(() => toFolderTreeSelectData(siteFolders), [siteFolders])
 
   useEffect(() => {
     if (!entryFilter) return
@@ -315,6 +345,11 @@ export function AiAnalysisPage() {
   }, [params, setParams])
 
   useEffect(() => {
+    if (!createOpen || createForm.getFieldValue('folderId')) return
+    createForm.setFieldValue('folderId', defaultSiteFolderId)
+  }, [createForm, createOpen, defaultSiteFolderId])
+
+  useEffect(() => {
     if (isHistoryView) return
     const requested = allEntries.find((entry) => entry.id === entryFilter)
     if (requested) {
@@ -329,9 +364,16 @@ export function AiAnalysisPage() {
   const profile = selected ? buildProfile(selected) : null
   const baseConfigText = profile ? JSON.stringify(profile.config, null, 2) : ''
   const configText = selected ? (configDrafts[selected.id] || selected.approvedConfig || baseConfigText) : ''
-  const confidence = selected?.status === '分析中' ? 0 : profile?.confidence || 0
+  const isQueued = selected?.status === '排队中'
+  const confidence = ['排队中', '分析中'].includes(selected?.status) ? 0 : profile?.confidence || 0
   const isAnalyzing = selected?.status === '分析中' || workingUrlId === selected?.id
   const isRestarting = workingUrlId === selected?.id
+  const selectedBatch = selected ? intakeBatches.find((batch) => batch.id === selected.batchId) : null
+  const runningCount = activeEntries.filter((entry) => entry.status === '分析中').length
+  const queuedCount = activeEntries.filter((entry) => entry.status === '排队中').length
+  const queuedPosition = isQueued
+    ? activeEntries.filter((entry) => entry.status === '排队中').findIndex((entry) => entry.id === selected.id) + 1
+    : 0
   const selectedRule = selected ? rules.find((rule) => rule.id === selected.ruleId) : null
   const selectedSourceExecution = selected?.sourceExecutionId || fromExecution || ''
   const selectedFailure = selected?.failureId || fromFailure || ''
@@ -420,6 +462,29 @@ export function AiAnalysisPage() {
     setParams(paramsForEntry(nextEntry), { replace: true })
   }
 
+  const toggleSelectedBatch = () => {
+    if (!selectedBatch) return
+    const paused = !selectedBatch.paused
+    setAnalysisBatchPaused(selectedBatch.id, paused)
+    message.success(paused ? '批次已暂停；正在运行的任务会完成，其余任务保持排队' : '批次已继续，排队任务将按并发上限调度')
+  }
+
+  const cancelSelectedTask = () => {
+    if (!selected || !cancelAnalysisEntry(selected.batchId, selected.id)) {
+      message.warning('当前任务不能取消')
+      return
+    }
+    const nextEntry = activeEntries.find((entry) => entry.id !== selected.id)
+    message.success('分析任务已取消')
+    if (nextEntry) {
+      setSelectedUrlId(nextEntry.id)
+      setParams(paramsForEntry(nextEntry), { replace: true })
+    } else {
+      setSelectedUrlId('')
+      navigate('/ai')
+    }
+  }
+
   const continueApprovedFlow = () => {
     if (selectedSourceExecution) {
       const sourceExecution = executions.find((execution) => execution.id === selectedSourceExecution)
@@ -434,12 +499,12 @@ export function AiAnalysisPage() {
     }
     const onboarding = selected.analysisKind === 'onboarding'
     if (onboarding || !matchingTasks.length) {
-      navigate(`/tasks?site=${encodeURIComponent(normalizeHost(getHost(selected.url)))}&create=1${onboarding ? '&setup=onboarding' : ''}`)
+      const site = sites.find((item) => normalizeHost(item.host) === normalizeHost(getHost(selected.url)))
+      navigate(site ? getSiteWorkspacePath(site, 'plan') : '/sites')
       return
     }
-    navigate(matchingTasks.length === 1
-      ? `/tasks?task=${encodeURIComponent(matchingTasks[0].id)}`
-      : `/tasks?site=${encodeURIComponent(normalizeHost(getHost(selected.url)))}`)
+    const site = sites.find((item) => item.id === matchingTasks[0]?.siteId || item.name === matchingTasks[0]?.site)
+    navigate(site ? getSiteWorkspacePath(site, 'plan') : '/sites')
   }
 
   const submitCorrection = () => {
@@ -473,6 +538,7 @@ export function AiAnalysisPage() {
       kind: entry.ruleId ? 'reanalyze' : 'onboarding',
       parentAnalysisId: entry.id,
       source: 'AI 分析历史',
+      folderId: entry.folderId,
     })
     setHandoffEntryId('')
     setSelectedUrlId(result.entryId)
@@ -509,33 +575,24 @@ export function AiAnalysisPage() {
 
   const submitAnalysisTask = async () => {
     const values = await createForm.validateFields()
+    const folderId = values.folderId || defaultSiteFolderId
     if (createMode !== 'existing') {
       const rows = createMode === 'file' ? createFileRows : parseAnalysisRows(values.urls)
       if (!rows.length) return message.warning('请输入至少一个有效的网站 URL')
-      importSites(rows, 'AI 分析')
-      const results = rows.map((row) => {
-        const existingSite = sites.find((site) => normalizeHost(site.host) === row.host)
-        const rule = rules.find((item) => normalizeHost(item.siteHost) === row.host)
-        return {
-          host: row.host,
-          ...startSiteAnalysis({
-            siteName: row.name || existingSite?.name || '待识别网站',
-            siteHost: row.host,
-            url: row.url,
-            ruleId: rule?.id,
-            kind: rule ? 'reanalyze' : 'onboarding',
-            source: 'AI 分析',
-          }),
-        }
-      })
-      const first = results[0]
-      setSelectedUrlId(first.entryId)
-      setParams(new URLSearchParams({ entry: first.entryId, site: first.host }), { replace: true })
+      const folderRows = rows.map((row) => ({ ...row, folderId }))
+      importSites(folderRows, 'AI 分析')
+      const result = createSiteAnalysisBatch({ rows: folderRows, folderId, source: 'AI 分析' })
+      if (!result.created) {
+        message.info(result.reused ? `${result.reused} 个网站已有活动分析任务，未重复创建` : '没有可创建的分析任务')
+        return
+      }
+      setSelectedUrlId(result.entryIds[0])
+      setParams(new URLSearchParams({ entry: result.entryIds[0], site: result.firstHost }), { replace: true })
       setCreateOpen(false)
       createForm.resetFields()
       setCreateFileName('')
       setCreateFileRows([])
-      message.success(`已创建 ${results.length} 个分析任务，网站资产已同步`)
+      message.success(`分析批次已创建：${result.created} 个任务，最多并发 ${ANALYSIS_CONCURRENCY_LIMIT} 个${result.reused ? `，复用 ${result.reused} 个活动任务` : ''}`)
       return
     }
     const site = sites.find((item) => (item.id || item.host) === values.siteId)
@@ -548,6 +605,7 @@ export function AiAnalysisPage() {
       ruleId: rule?.id,
       kind: rule ? 'reanalyze' : 'onboarding',
       source: 'AI 分析',
+      folderId,
     })
     setSelectedUrlId(result.entryId)
     setParams(new URLSearchParams({ entry: result.entryId, site: site.host }), { replace: true })
@@ -585,10 +643,20 @@ export function AiAnalysisPage() {
           onChange={(value) => {
             setCreateMode(value)
             createForm.resetFields()
+            createForm.setFieldValue('folderId', defaultSiteFolderId)
             setCreateFileName('')
             setCreateFileRows([])
           }}
         />
+        {createMode !== 'existing' && (
+          <Alert
+            className="ai-create-queue-note"
+            type="info"
+            showIcon
+            title="批量任务将进入受控队列"
+            description={`同一时间最多分析 ${ANALYSIS_CONCURRENCY_LIMIT} 个网站，其余任务保持排队；批次可以暂停或继续，不会一次性占满 AI 资源。`}
+          />
+        )}
         {createMode === 'new' ? (
           <Form.Item
             name="urls"
@@ -625,9 +693,24 @@ export function AiAnalysisPage() {
               placeholder={availableSites.length ? '选择网站或搜索域名' : '所有网站均有活动分析任务'}
               options={availableSites}
               notFoundContent="没有可创建任务的网站"
+              onChange={(siteId) => {
+                const site = sites.find((item) => (item.id || item.host) === siteId)
+                createForm.setFieldValue('folderId', site?.folderId || defaultSiteFolderId)
+              }}
             />
           </Form.Item>
         )}
+        <Form.Item name="folderId" label="归属文件夹" rules={[{ required: true, message: '请选择归属文件夹' }]}>
+          <FolderTreeSelect
+            folders={siteFolders}
+            createFolder={createSiteFolder}
+            treeData={folderTreeSelectData}
+            treeDefaultExpandAll
+            showSearch
+            treeNodeFilterProp="title"
+            placeholder="选择文件夹"
+          />
+        </Form.Item>
       </Form>
     </Modal>
   )
@@ -642,7 +725,7 @@ export function AiAnalysisPage() {
     {
       title: '网站',
       key: 'site',
-      render: (_, entry) => <SourceCell name={entry.site} host={normalizeHost(getHost(entry.url))} />,
+      render: (_, entry) => <SourceCell name={entry.site} />,
     },
     {
       title: '分析类型',
@@ -659,13 +742,8 @@ export function AiAnalysisPage() {
     {
       title: '规则版本',
       key: 'ruleVersion',
-      width: 150,
-      render: (_, entry) => (
-        <div className="ai-history-version">
-          <strong className="mono">{entry.releaseVersion || '—'}</strong>
-          <span className="mono">{entry.ruleId || '未发布规则'}</span>
-        </div>
-      ),
+      width: 110,
+      render: (_, entry) => <span className="mono">{entry.releaseVersion || '—'}</span>,
     },
     {
       title: '来源',
@@ -792,10 +870,19 @@ export function AiAnalysisPage() {
       : !automaticRegression.passed
         ? `自动回归未通过：${automaticRegression.reason}`
         : ''
-  const queueGroups = [
-    { key: 'action', label: '需要处理', entries: visibleEntries.filter((entry) => entry.status !== '分析中') },
+  const queueBuckets = [
+    { key: 'action', label: '需要处理', entries: visibleEntries.filter((entry) => !['分析中', '排队中'].includes(entry.status)) },
     { key: 'working', label: '分析中', entries: visibleEntries.filter((entry) => entry.status === '分析中') },
-  ].filter((group) => group.entries.length)
+    { key: 'queued', label: '排队中', entries: visibleEntries.filter((entry) => entry.status === '排队中') },
+  ]
+  const orderedVisibleEntries = queueBuckets.flatMap((group) => group.entries)
+  const pagedQueueEntries = orderedVisibleEntries.slice((queuePage - 1) * QUEUE_PAGE_SIZE, queuePage * QUEUE_PAGE_SIZE)
+  const pagedQueueIds = new Set(pagedQueueEntries.map((entry) => entry.id))
+  const queueGroups = queueBuckets.map((group) => ({
+    ...group,
+    total: group.entries.length,
+    entries: group.entries.filter((entry) => pagedQueueIds.has(entry.id)),
+  })).filter((group) => group.entries.length)
 
   return (
     <div className={`page-content ${isHistoryView ? 'ai-history-detail-layout' : 'ai-analysis-layout'}`}>
@@ -816,16 +903,33 @@ export function AiAnalysisPage() {
               <Button type="primary" size="small" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新建分析</Button>
             </div>
           </header>
+          <div className="ai-queue-governance">
+            <div>
+              <span>受控队列</span>
+              <strong className="mono">{runningCount} / {ANALYSIS_CONCURRENCY_LIMIT}</strong>
+              <small>{queuedCount ? `${queuedCount} 个等待调度` : '当前无排队任务'}</small>
+            </div>
+            {selectedBatch && selectedBatch.urls.some((entry) => entry.status === '排队中') && (
+              <Tooltip title={selectedBatch.paused ? '继续当前批次' : '暂停当前批次'}>
+                <Button
+                  size="small"
+                  aria-label={selectedBatch.paused ? '继续当前批次' : '暂停当前批次'}
+                  icon={selectedBatch.paused ? <PlayCircleOutlined /> : <PauseOutlined />}
+                  onClick={toggleSelectedBatch}
+                />
+              </Tooltip>
+            )}
+          </div>
           <div className="ai-analysis-queue-list">
             {queueGroups.map((group) => (
               <div className="ai-queue-group" key={group.key}>
-                <div className="ai-queue-group-label"><span>{group.label}</span><b>{group.entries.length}</b></div>
+                <div className="ai-queue-group-label"><span>{group.label}</span><b>{group.total}</b></div>
                 {group.entries.map((entry) => (
                   <button className={`ai-analysis-item ${entry.id === selected.id ? 'active' : ''}`} key={entry.id} onClick={() => selectEntry(entry)} aria-pressed={entry.id === selected.id}>
                     <span className="ai-analysis-item-top"><strong>{entry.site}</strong><StatusTag value={displayStatus(entry.status)} /></span>
                     <span className="ai-analysis-item-entry">
                       <span className="mono ai-analysis-item-url" title={`${entry.id} · ${entry.url}`}>{entry.url}</span>
-                      <span className="mono ai-analysis-item-confidence" title="置信度">{entry.status === '分析中' ? '解析中' : `${entry.confidence || buildProfile(entry).confidence}%`}</span>
+                      <span className="mono ai-analysis-item-confidence" title="任务进度">{entry.status === '排队中' ? '等待调度' : entry.status === '分析中' ? '解析中' : `${entry.confidence || buildProfile(entry).confidence}%`}</span>
                     </span>
                   </button>
                 ))}
@@ -833,6 +937,19 @@ export function AiAnalysisPage() {
             ))}
             {!visibleEntries.length && <div className="ai-queue-empty">没有匹配的当前任务</div>}
           </div>
+          {visibleEntries.length > QUEUE_PAGE_SIZE && (
+            <div className="ai-queue-pagination">
+              <Pagination
+                simple
+                size="small"
+                current={queuePage}
+                pageSize={QUEUE_PAGE_SIZE}
+                total={visibleEntries.length}
+                showSizeChanger={false}
+                onChange={setQueuePage}
+              />
+            </div>
+          )}
         </section>
       )}
 
@@ -880,6 +997,8 @@ export function AiAnalysisPage() {
           <div className="ai-detail-actions">
             {isHistorical ? (
               <Button type="primary" icon={<ReloadOutlined />} onClick={restartHistoricalAnalysis}>重新分析</Button>
+            ) : isQueued ? (
+              <Button danger icon={<StopOutlined />} onClick={cancelSelectedTask}>取消任务</Button>
             ) : (
               <>
                 <Button icon={<ReloadOutlined />} disabled={isRestarting} onClick={() => runAnalysis()}>{selected.status === '分析中' ? '重新开始分析' : '重新分析'}</Button>
@@ -929,7 +1048,24 @@ export function AiAnalysisPage() {
           />
         )}
 
-        {isAnalyzing ? (
+        {isQueued ? (
+          <section className="analysis-surface ai-pipeline-card ai-queued-card">
+            <header className="ai-section-header">
+              <div><PauseOutlined /><h2>等待调度</h2><StatusTag value="排队中" /></div>
+              <span className="mono">队列位置 {queuedPosition || 1}</span>
+            </header>
+            <div className="ai-queued-summary">
+              <strong>{selectedBatch?.paused ? '当前批次已暂停' : '任务已进入受控分析队列'}</strong>
+              <p>{selectedBatch?.paused
+                ? '继续批次后，系统会在有空闲并发时启动该任务。'
+                : `系统同时最多运行 ${ANALYSIS_CONCURRENCY_LIMIT} 个网站分析，本任务会在前序任务完成后自动开始。`}</p>
+              <div>
+                <span>批次</span><b className="mono">{selected.batchId}</b>
+                <span>批次并发</span><b className="mono">{selected.batchConcurrency}</b>
+              </div>
+            </div>
+          </section>
+        ) : isAnalyzing ? (
           <section className="analysis-surface ai-pipeline-card">
             <header className="ai-section-header">
               <div><RobotOutlined /><h2>AI 分析流水线</h2><StatusTag value="分析中" /></div>

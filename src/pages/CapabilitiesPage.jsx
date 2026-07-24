@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Alert, App as AntApp, Button, Descriptions, Grid, Input, Modal, Progress, Segmented, Space, Table, Timeline } from 'antd'
 import { CodeOutlined, EditOutlined, ExperimentOutlined, HistoryOutlined, LeftOutlined, RocketOutlined } from '@ant-design/icons'
 import { useNavigate, useOutletContext, useParams } from 'react-router-dom'
-import { PageTitle, RowActions, SectionCard, SourceCell, StatusTag } from '../components/ConsoleUI'
+import { PageTitle, SectionCard, SourceCell, StatusTag } from '../components/ConsoleUI'
 import { usePrototype } from '../app/PrototypeContext'
 
 export function CapabilitiesPage() {
@@ -108,20 +108,20 @@ export function CapabilitiesPage() {
   }
 
   const columns = [
-    { title: '能力', width: screens.md ? 260 : undefined, render: (_, row) => <SourceCell name={row.name} host={row.id} onClick={() => openCapability(row)} ariaLabel={`查看 ${row.name}`} /> },
+    { title: 'ID', dataIndex: 'id', width: 120, responsive: ['sm'], render: (value) => <span className="mono muted">{value}</span> },
+    { title: '能力', width: screens.md ? 240 : undefined, render: (_, row) => <SourceCell name={row.name} onClick={() => openCapability(row)} ariaLabel={`查看 ${row.name}`} /> },
     { title: '版本', dataIndex: 'version', width: 130, responsive: ['lg'], render: (value) => <span className="mono">{value}</span> },
     { title: '状态', dataIndex: 'status', width: 120, responsive: ['sm'], render: (value) => <StatusTag value={value} /> },
     { title: '影响规则', dataIndex: 'rules', width: 100, align: 'right', responsive: ['xl'] },
     { title: '回归成功率', dataIndex: 'successRate', width: 170, responsive: ['md'], render: (value) => <Progress percent={Number.parseFloat(value)} size="small" /> },
     { title: '更新时间', dataIndex: 'updatedAt', width: 130, responsive: ['xl'] },
-    { title: '操作', width: screens.md ? 100 : 84, fixed: screens.md ? 'right' : undefined, align: 'right', render: (_, row) => <RowActions primary={{ label: '维护', onClick: () => openCapability(row) }} /> },
   ]
 
   return (
     <div className="page-content">
       <div className="list-toolbar"><Segmented value={scope} onChange={setScope} options={['全部', '已发布', '候选版本']} /><div className="toolbar-spacer" /></div>
       <SectionCard title={<PageTitle count={visible.length}>能力策略</PageTitle>} bodyStyle={{ padding: 0 }}>
-        <Table className="capabilities-table" rowKey="id" columns={columns} dataSource={visible} pagination={false} scroll={screens.md ? { x: 720 } : undefined} />
+        <Table className="capabilities-table" rowKey="id" columns={columns} dataSource={visible} pagination={false} scroll={screens.md ? { x: 780 } : undefined} />
       </SectionCard>
     </div>
   )

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Alert, App as AntApp, Button, Descriptions, Empty, Input, Space, Table, Timeline, Tooltip } from 'antd'
+import { Alert, App as AntApp, Button, Descriptions, Empty, Input, Space, Timeline, Tooltip } from 'antd'
 import {
   CheckCircleOutlined,
   EditOutlined,
@@ -11,6 +11,7 @@ import {
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { PageTitle, SectionCard, StatusTag } from './ConsoleUI'
 import { usePrototype } from '../app/PrototypeContext'
+import { getSiteWorkspacePath } from '../app/routes'
 
 function createCandidateVersion(version) {
   const parts = version.replace(/^v/, '').split('.').map(Number)
@@ -18,7 +19,7 @@ function createCandidateVersion(version) {
   return `v${parts[0]}.${parts[1]}.${parts[2] + 1}-rc.1`
 }
 
-export function SiteRulePanel({ site, rule, standalone = false }) {
+export function SiteRulePanel({ site, rule, standalone = false, onOpenPlan }) {
   const { message } = AntApp.useApp()
   const navigate = useNavigate()
   const [params] = useSearchParams()
@@ -29,7 +30,7 @@ export function SiteRulePanel({ site, rule, standalone = false }) {
   const fromFailureId = params.get('fromFailure')
   const editRequested = params.get('edit') === '1'
   const sourceExecution = executions.find((execution) => execution.id === fromExecutionId)
-  const boundTasks = tasks.filter((task) => task.site === site.name)
+  const boundTasks = tasks.filter((task) => task.siteId === site.id || task.site === site.name || task.ruleId === rule?.id)
 
   useEffect(() => {
     setEditing(editRequested)
@@ -46,6 +47,7 @@ export function SiteRulePanel({ site, rule, standalone = false }) {
       kind,
       failureId: fromFailureId || '',
       sourceExecutionId: fromExecutionId || '',
+      folderId: site.folderId,
     })
     navigate(`/ai?entry=${encodeURIComponent(result.entryId)}&site=${encodeURIComponent(site.host)}&mode=${kind}${fromExecutionId ? `&fromExecution=${encodeURIComponent(fromExecutionId)}` : ''}`)
   }
@@ -66,8 +68,11 @@ export function SiteRulePanel({ site, rule, standalone = false }) {
   const ruleReady = rule.status === '已发布' && rule.version !== 'v0.0.0'
 
   const openPlans = () => {
-    if (boundTasks.length === 1) navigate(`/tasks?task=${encodeURIComponent(boundTasks[0].id)}`)
-    else navigate(`/tasks?site=${encodeURIComponent(site.host)}${boundTasks.length ? '' : '&create=1'}`)
+    if (onOpenPlan) {
+      onOpenPlan()
+      return
+    }
+    navigate(getSiteWorkspacePath(site, 'plan'))
   }
 
   const retrySourceExecution = () => {
@@ -207,14 +212,6 @@ export function SiteRulePanel({ site, rule, standalone = false }) {
               }}>运行回归</Button>
               <Button block type="primary" icon={<RocketOutlined />} disabled={!rule.candidateVersion || rule.regression !== 'passed'} onClick={publish}>发布候选版本</Button>
             </div>
-          </SectionCard>
-
-          <SectionCard title={<PageTitle count={boundTasks.length}>采集计划</PageTitle>} bodyStyle={{ padding: 0 }}>
-            <Table rowKey="id" size="small" pagination={false} dataSource={boundTasks} columns={[
-              { title: '计划', dataIndex: 'name' },
-              { title: '版本', dataIndex: 'ruleVersion', width: 80, render: (value) => <span className="mono">{value}</span> },
-              { title: '状态', dataIndex: 'status', width: 80, render: (value) => <StatusTag value={value} /> },
-            ]} />
           </SectionCard>
         </div>
       </div>

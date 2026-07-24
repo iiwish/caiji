@@ -17,21 +17,18 @@ import {
 } from 'antd'
 import {
   CaretRightOutlined,
-  CheckOutlined,
-  CloseOutlined,
   CodeOutlined,
   DeleteOutlined,
   DownOutlined,
-  EditOutlined,
   LeftOutlined,
   PlusOutlined,
   SafetyCertificateOutlined,
   SaveOutlined,
 } from '@ant-design/icons'
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
-import { RowActions, StatusTag } from '../components/ConsoleUI'
+import { EntityLink, StatusTag } from '../components/ConsoleUI'
 import { usePrototype } from '../app/PrototypeContext'
-import { getSiteRulePath } from '../app/routes'
+import { getSiteRulePath, getSiteWorkspacePath } from '../app/routes'
 
 const PAGE_SIZE = 10
 const DEDUP_FIELDS = ['url', 'title', 'pub_date', 'buyer', 'project_no', 'region']
@@ -82,14 +79,13 @@ function getTaskCollectionMode(task) {
   return task.scope === '全量' && task.bootstrapStatus !== '已完成' ? '全量' : '增量'
 }
 
-function createDraft(task, rule) {
+function createDraft(task, rule, site) {
   const headers = (task.headers || []).map((header) => ({ ...header }))
   const customHeadersEnabled = task.customHeadersEnabled ?? headers.length > 0
   const authFunctionId = task.authFunctionId || ''
   return {
     isNew: false,
-    name: task.name,
-    nameCustomized: true,
+    name: defaultTaskName(site) || task.name,
     siteHost: rule?.siteHost || '',
     versionPolicy: task.versionPolicy || '跟随最新发布',
     enabled: task.status === '启用',
@@ -106,17 +102,16 @@ function createDraft(task, rule) {
   }
 }
 
-function defaultTaskName(site, setupMode) {
+function defaultTaskName(site) {
   if (!site) return ''
-  return setupMode === 'onboarding' ? `${site.name}首次采集` : `${site.name}采集计划`
+  return `${site.name}采集计划`
 }
 
-function createNewTaskDraft(site, setupMode, sourceSiteFilter = '') {
+function createNewTaskDraft(site, sourceSiteFilter = '') {
   return {
     isNew: true,
     sourceSiteFilter,
-    name: defaultTaskName(site, setupMode),
-    nameCustomized: false,
+    name: defaultTaskName(site),
     siteHost: site?.host || '',
     versionPolicy: '跟随最新发布',
     enabled: false,
@@ -133,50 +128,43 @@ function createNewTaskDraft(site, setupMode, sourceSiteFilter = '') {
   }
 }
 
-function CollectionSource({ task, host }) {
-  const running = task.status === '启用'
-  return (
-    <div className="collection-source">
-      <i className={running ? 'running' : 'paused'} />
-      <div>
-        <strong>{task.site}</strong>
-        <span className="mono">{host || task.id}</span>
-      </div>
-    </div>
-  )
-}
-
-export function TasksPage() {
+export function TasksPage({ embeddedSiteId = '' }) {
   const { message } = AntApp.useApp()
   const navigate = useNavigate()
   const { search } = useOutletContext()
   const [params, setParams] = useSearchParams()
-  const ruleFilter = params.get('rule')
-  const taskFilter = params.get('task')
-  const siteFilter = params.get('site')
-  const createRequested = params.get('create') === '1'
-  const setupMode = params.get('setup')
   const { tasks, rules, sites, executions, saveTask, createTask, runTask } = usePrototype()
+  const embeddedSite = embeddedSiteId ? sites.find((site) => site.id === embeddedSiteId) : null
+  const embeddedRule = embeddedSite ? rules.find((rule) => rule.siteId === embeddedSite.id || rule.siteHost === embeddedSite.host) : null
+  const embeddedTask = embeddedSite ? tasks.find((task) => task.siteId === embeddedSite.id || task.site === embeddedSite.name || task.ruleId === embeddedRule?.id) : null
+  const embedded = Boolean(embeddedSite)
+  const ruleFilter = embedded ? null : params.get('rule')
+  const taskFilter = embedded ? embeddedTask?.id || null : params.get('task')
+  const siteFilter = embedded ? embeddedSite.host : params.get('site')
+  const contextRuleReadyForEmbedded = isRuleReady(embeddedRule)
+  const createRequested = embedded ? Boolean(!embeddedTask && contextRuleReadyForEmbedded) : params.get('create') === '1'
+  const setupMode = embedded && !embeddedTask ? 'onboarding' : params.get('setup')
   const [scope, setScope] = useState('全部')
   const [page, setPage] = useState(1)
   const [selectedTaskId, setSelectedTaskId] = useState(taskFilter || null)
   const [draft, setDraft] = useState(null)
-  const [editingTitle, setEditingTitle] = useState(false)
-  const [titleBeforeEdit, setTitleBeforeEdit] = useState('')
-  const [focusedExecutionId, setFocusedExecutionId] = useState('')
   const selectedTask = tasks.find((task) => task.id === selectedTaskId) || null
-  const contextSite = siteFilter ? sites.find((site) => site.host === siteFilter) : null
-  const contextRule = siteFilter ? rules.find((rule) => rule.siteHost === siteFilter) : null
+  const contextSite = embeddedSite || (siteFilter ? sites.find((site) => site.host === siteFilter) : null)
+  const contextRule = embeddedRule || (siteFilter ? rules.find((rule) => rule.siteHost === siteFilter) : null)
   const contextRuleReady = isRuleReady(contextRule)
   const selectedRule = selectedTask
     ? rules.find((rule) => rule.id === selectedTask.ruleId)
     : draft?.isNew
       ? rules.find((rule) => rule.siteHost === draft.siteHost)
       : null
-  const allSiteOptions = useMemo(() => sites.map((site) => ({ value: site.host, label: `${site.name} · ${site.host}` })), [sites])
+  const selectedTaskSite = selectedTask
+    ? sites.find((site) => site.id === selectedTask.siteId
+      || site.name === selectedTask.site
+      || site.host === selectedRule?.siteHost)
+    : null
   const siteOptions = useMemo(() => sites
-    .filter((site) => isRuleReady(rules.find((rule) => rule.siteHost === site.host)))
-    .map((site) => ({ value: site.host, label: `${site.name} · ${site.host}` })), [rules, sites])
+    .filter((site) => isRuleReady(rules.find((rule) => rule.siteHost === site.host)) && !tasks.some((task) => task.site === site.name))
+    .map((site) => ({ value: site.host, label: `${site.name} · ${site.host}` })), [rules, sites, tasks])
 
   const visibleTasks = useMemo(() => tasks.filter((task) => {
     const matchesScope = scope === '全部'
@@ -186,13 +174,14 @@ export function TasksPage() {
       || (scope === '全量采集' && getTaskCollectionMode(task) === '全量')
       || (scope === '定时增量' && getTaskCollectionMode(task) === '增量')
     const taskRule = rules.find((rule) => rule.id === task.ruleId)
-    const taskSite = sites.find((site) => site.name === task.site)
+    const taskSite = sites.find((site) => site.id === task.siteId || site.name === task.site || site.host === taskRule?.siteHost)
     const taskHost = taskSite?.host || taskRule?.siteHost
+    const taskName = defaultTaskName(taskSite) || task.name
     return (!ruleFilter || task.ruleId === ruleFilter)
       && (!taskFilter || task.id === taskFilter)
       && (!siteFilter || taskHost === siteFilter)
       && matchesScope
-      && `${task.id}${task.name}${task.site}${task.ruleId}`.toLowerCase().includes(search.trim().toLowerCase())
+      && `${task.id}${taskName}${task.site}${task.ruleId}`.toLowerCase().includes(search.trim().toLowerCase())
   }), [tasks, rules, sites, ruleFilter, taskFilter, siteFilter, scope, search])
 
   useEffect(() => {
@@ -201,8 +190,7 @@ export function TasksPage() {
 
   useEffect(() => {
     if (!selectedTask) return
-    setEditingTitle(false)
-    setDraft(createDraft(selectedTask, selectedRule))
+    setDraft(createDraft(selectedTask, selectedRule, selectedTaskSite))
   }, [selectedTaskId, selectedRule])
 
   useEffect(() => {
@@ -215,7 +203,7 @@ export function TasksPage() {
     setDraft((current) => {
       if (current?.isNew && current.sourceSiteFilter === (siteFilter || '') && current.setupMode === (setupMode || '')) return current
       return {
-        ...createNewTaskDraft(contextRuleReady ? contextSite : null, setupMode, siteFilter || ''),
+        ...createNewTaskDraft(contextRuleReady ? contextSite : null, siteFilter || ''),
         setupMode: setupMode || '',
       }
     })
@@ -227,52 +215,32 @@ export function TasksPage() {
 
   const openConfig = (task) => {
     const rule = rules.find((item) => item.id === task.ruleId)
-    setEditingTitle(false)
+    const site = sites.find((item) => item.id === task.siteId || item.name === task.site || item.host === rule?.siteHost)
     setSelectedTaskId(task.id)
-    setDraft(createDraft(task, rule))
-    const nextParams = new URLSearchParams(params)
-    nextParams.set('task', task.id)
-    nextParams.delete('site')
-    nextParams.delete('create')
-    setParams(nextParams, { replace: true })
+    setDraft(createDraft(task, rule, site))
+    if (!embedded) {
+      const nextParams = new URLSearchParams(params)
+      nextParams.set('task', task.id)
+      nextParams.delete('site')
+      nextParams.delete('create')
+      setParams(nextParams, { replace: true })
+    }
   }
 
   const backToList = () => {
-    const returnSite = draft?.isNew ? draft.sourceSiteFilter : ''
-    setEditingTitle(false)
     setSelectedTaskId(null)
     setDraft(null)
-    navigate(returnSite ? `/tasks?site=${encodeURIComponent(returnSite)}` : '/tasks')
+    navigate(embedded ? getSiteWorkspacePath(embeddedSite, 'overview') : '/sites')
   }
 
   const updateDraft = (patch) => setDraft((current) => ({ ...current, ...patch }))
-
-  const startTitleEdit = () => {
-    setTitleBeforeEdit(draft.name)
-    setEditingTitle(true)
-  }
-
-  const finishTitleEdit = () => {
-    const name = draft.name.trim()
-    if (!name) {
-      message.warning('请输入采集计划名称')
-      return
-    }
-    updateDraft({ name })
-    setEditingTitle(false)
-  }
-
-  const cancelTitleEdit = () => {
-    updateDraft({ name: titleBeforeEdit })
-    setEditingTitle(false)
-  }
 
   const updateDraftSite = (siteHost) => {
     const site = sites.find((item) => item.host === siteHost)
     setDraft((current) => ({
       ...current,
       siteHost,
-      name: current.nameCustomized ? current.name : defaultTaskName(site, setupMode),
+      name: defaultTaskName(site),
     }))
   }
 
@@ -316,8 +284,9 @@ export function TasksPage() {
       ? draft.headers.filter((header) => header.name.trim() && header.value.trim())
       : []
     const authEnabled = draft.customHeadersEnabled || Boolean(draft.authFunctionId)
+    const site = sites.find((item) => item.host === draft.siteHost) || selectedTaskSite
     return {
-      name: draft.name.trim(),
+      name: defaultTaskName(site),
       versionPolicy: draft.versionPolicy,
       collectionMode: draft.collectionMode,
       initialScope: draft.collectionMode === '全量' ? '全量' : '不回补',
@@ -341,10 +310,6 @@ export function TasksPage() {
 
   const saveConfig = (showMessage = true) => {
     const patch = getConfigPatch()
-    if (!patch.name) {
-      message.warning('请输入采集计划名称')
-      return null
-    }
     if (draft.customHeadersEnabled && !patch.headers.length) {
       message.warning('请填写至少一组完整的自定义 Header，或关闭该选项')
       return null
@@ -356,6 +321,14 @@ export function TasksPage() {
   }
 
   const openCreate = () => {
+    if (embedded) {
+      setSelectedTaskId(null)
+      setDraft({
+        ...createNewTaskDraft(contextRuleReady ? contextSite : null, siteFilter || ''),
+        setupMode: setupMode || '',
+      })
+      return
+    }
     const nextParams = new URLSearchParams()
     nextParams.set('create', '1')
     if (siteFilter && siteOptions.some((option) => option.value === siteFilter)) nextParams.set('site', siteFilter)
@@ -365,14 +338,16 @@ export function TasksPage() {
 
   const createFromDraft = (enabled) => {
     const patch = getConfigPatch(enabled)
-    if (!patch.name) {
-      message.warning('请输入采集计划名称')
-      return
-    }
     const site = sites.find((item) => item.host === draft.siteHost)
     const rule = rules.find((item) => item.siteHost === draft.siteHost)
     if (!site || !isRuleReady(rule)) {
       message.warning('请选择已经发布采集规则的网站')
+      return
+    }
+    const existingTask = tasks.find((task) => task.siteId === site.id || task.site === site.name)
+    if (existingTask) {
+      message.info('该网站已经配置采集计划，已打开现有配置')
+      navigate(embedded ? getSiteWorkspacePath(site, 'plan') : `/tasks?task=${encodeURIComponent(existingTask.id)}`)
       return
     }
     if (draft.customHeadersEnabled && !patch.headers.length) {
@@ -382,12 +357,13 @@ export function TasksPage() {
     const taskId = createTask({
       ...patch,
       site: site.name,
+      siteId: site.id,
       ruleId: rule.id,
       ruleVersion: rule.version,
     })
     setSelectedTaskId(taskId)
     message.success(enabled ? `采集计划 ${taskId} 已创建并启用` : `采集计划 ${taskId} 已保存为草稿`)
-    navigate(`/tasks?task=${taskId}${setupMode ? `&setup=${encodeURIComponent(setupMode)}` : ''}`)
+    navigate(embedded ? getSiteWorkspacePath(site, 'plan') : `/tasks?task=${taskId}${setupMode ? `&setup=${encodeURIComponent(setupMode)}` : ''}`)
   }
 
   const runNow = () => {
@@ -402,7 +378,6 @@ export function TasksPage() {
       message.warning('当前配置暂时无法执行')
       return
     }
-    setFocusedExecutionId(executionId)
     message.success(`配置已保存，${draft.collectionMode === '全量' ? '全量' : '增量'}采集批次 ${executionId} 已启动`)
   }
 
@@ -415,68 +390,47 @@ export function TasksPage() {
     },
     {
       title: '采集计划',
-      dataIndex: 'name',
       width: 220,
-      render: (value, task) => <button type="button" className="table-entity-link" onClick={() => openConfig(task)}>{value}</button>,
+      render: (_, task) => {
+        const rule = rules.find((item) => item.id === task.ruleId)
+        const site = sites.find((item) => item.id === task.siteId || item.name === task.site || item.host === rule?.siteHost)
+        const taskName = defaultTaskName(site) || task.name
+        return <EntityLink title={taskName} onClick={() => openConfig(task)} ariaLabel={`配置采集计划 ${taskName}`} />
+      },
     },
+    {
+      title: '采集模式',
+      width: 105,
+      render: (_, task) => {
+        const mode = getTaskCollectionMode(task)
+        return <span className={`collection-mode-tag ${mode === '全量' ? 'full' : 'incremental'}`}>{mode === '全量' ? '全量采集' : '增量采集'}</span>
+      },
+    },
+    { title: '执行频率', dataIndex: 'frequency', width: 120, render: (value) => <span>{value || '每 1 小时'}</span> },
+    { title: '下次执行', dataIndex: 'nextRun', width: 115, responsive: ['md'], render: (value) => <span className="mono muted">{value}</span> },
     {
       title: '状态',
       dataIndex: 'status',
       width: 96,
       render: (value) => <StatusTag value={value} />,
     },
-    {
-      title: '关联网站',
-      width: 230,
-      render: (_, task) => {
-        const rule = rules.find((item) => item.id === task.ruleId)
-        const site = sites.find((item) => item.name === task.site)
-        return <CollectionSource task={task} host={site?.host || rule?.siteHost} />
-      },
-    },
-    {
-      title: '采集策略',
-      width: 200,
-      render: (_, task) => {
-        const collectionMode = getTaskCollectionMode(task)
-        return (
-          <div className="collection-strategy-cell">
-            <strong>{collectionMode === '全量' ? '全量采集' : '定时增量'}</strong>
-            <span>{task.frequency || '每 1 小时'}</span>
-          </div>
-        )
-      },
-    },
-    { title: '版本策略', dataIndex: 'versionPolicy', width: 125, responsive: ['xl'] },
-    { title: '下次执行', dataIndex: 'nextRun', width: 115, responsive: ['md'], render: (value) => <span className="mono muted">{value}</span> },
     { title: '最近结果', width: 105, responsive: ['lg'], render: (_, task) => {
       const latest = executions.find((execution) => execution.taskId === task.id)
       return latest ? <StatusTag value={latest.status} /> : <span className="muted">暂无执行</span>
     } },
-    {
-      title: '操作',
-      width: 100,
-      align: 'right',
-      fixed: 'right',
-      render: (_, task) => <RowActions primary={{ label: '配置', onClick: () => openConfig(task) }} />,
-    },
   ]
   const boundAuthFunction = draft ? AUTH_FUNCTIONS.find((item) => item.value === draft.authFunctionId) : null
   const isCreating = Boolean(createRequested && draft?.isNew)
-  const canCreateTask = Boolean(isCreating && draft.name.trim() && draft.siteHost && isRuleReady(selectedRule))
-  const latestExecution = selectedTask
-    ? executions.find((execution) => execution.id === focusedExecutionId && execution.taskId === selectedTask.id)
-      || executions.find((execution) => execution.taskId === selectedTask.id)
-    : null
-  const latestExecutionRunning = latestExecution && ['运行中', '重试中'].includes(latestExecution.status)
-
+  const draftSite = draft?.siteHost ? sites.find((site) => site.host === draft.siteHost) : selectedTaskSite
+  const taskDisplayName = defaultTaskName(draftSite) || '采集计划'
+  const canCreateTask = Boolean(isCreating && draft.siteHost && isRuleReady(selectedRule))
   if ((selectedTask || isCreating) && draft) {
     return (
-      <div className="page-content collection-config-page">
-        <div className="back-row">
-          <Button icon={<LeftOutlined />} onClick={backToList}>返回列表</Button>
+      <div className={embedded ? 'collection-config-page collection-config-embedded' : 'page-content collection-config-page'}>
+        {!embedded && <div className="back-row">
+          <Button icon={<LeftOutlined />} onClick={backToList}>返回网站管理</Button>
           <span>{isCreating ? '新建采集计划' : '采集配置'}</span>
-        </div>
+        </div>}
 
         {setupMode === 'onboarding' && (
           <Alert
@@ -492,80 +446,47 @@ export function TasksPage() {
 
         <section className="collection-config-surface collection-config-header">
           <div className="collection-config-identity">
-            {editingTitle && !isCreating ? (
-              <div className="collection-title-editor">
-                <Input
-                  autoFocus
-                  aria-label="编辑采集计划名称"
-                  maxLength={60}
-                  value={draft.name}
-                  onChange={(event) => updateDraft({ name: event.target.value })}
-                  onPressEnter={finishTitleEdit}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Escape') cancelTitleEdit()
-                  }}
-                />
-                <Tooltip title="完成编辑"><Button type="text" aria-label="完成名称编辑" icon={<CheckOutlined />} onClick={finishTitleEdit} /></Tooltip>
-                <Tooltip title="取消编辑"><Button type="text" aria-label="取消名称编辑" icon={<CloseOutlined />} onClick={cancelTitleEdit} /></Tooltip>
-              </div>
-            ) : (
-              <div className="collection-title-row">
-                <h1>{isCreating ? '新建采集计划' : draft.name}</h1>
-                {!isCreating && <Tooltip title="编辑计划名称"><Button className="collection-title-edit-button" type="text" aria-label="编辑计划名称" icon={<EditOutlined />} onClick={startTitleEdit} /></Tooltip>}
-              </div>
-            )}
+            <div className="collection-title-row">
+              <h1>{isCreating && !draftSite ? '新建采集计划' : taskDisplayName}</h1>
+            </div>
             <span className="mono">{isCreating ? '保存后生成计划 ID' : selectedTask.id}</span>
           </div>
           <div className="collection-task-switch">
             {isCreating ? <span className="collection-lifecycle-tag">未保存</span> : <>
               {selectedRule?.status === '需修复' && <StatusTag value="规则异常" />}
               <span>计划状态</span>
-              <Switch aria-label={`启用采集计划：${selectedTask.name}`} checked={draft.enabled} onChange={(enabled) => updateDraft({ enabled })} />
+              <Switch aria-label={`启用采集计划：${taskDisplayName}`} checked={draft.enabled} onChange={(enabled) => updateDraft({ enabled })} />
               <Button type="primary" icon={<CaretRightOutlined />} disabled={!draft.enabled || selectedRule?.status === '需修复'} onClick={runNow}>{setupMode === 'onboarding' ? '开始首次采集' : '立即执行'}</Button>
             </>}
           </div>
         </section>
 
-        {!isCreating && latestExecution && (
-          <div className="collection-execution-strip" aria-live="polite">
-            <div className="collection-execution-summary">
-              <span>最近执行</span>
-              <StatusTag value={latestExecution.status} />
-              <strong className="mono">{latestExecution.id}</strong>
-              <small>{latestExecutionRunning
-                ? `${latestExecution.collectionType || '采集任务'}正在运行`
-                : `采集 ${latestExecution.articles || 0} 条 · ${latestExecution.duration || '-'}`}</small>
-            </div>
-            <Button type="link" onClick={() => navigate(`/executions/${latestExecution.id}`)}>查看详情</Button>
-          </div>
-        )}
-
         <section className="collection-config-surface collection-config-section collection-basic-section">
           <div className="collection-section-heading">
-            <div><h2>基本信息</h2><p>{isCreating ? '计划保存前不会进入调度队列' : '查看关联网站并设置规则版本策略'}</p></div>
+            <div>
+              <h2>{isCreating && !embedded ? '基本信息' : '规则版本'}</h2>
+              <p>{isCreating && !embedded ? '选择网站后绑定已发布规则' : '控制计划使用最新发布版本或固定版本'}</p>
+            </div>
           </div>
-          <div className={`collection-basic-grid ${isCreating ? '' : 'existing'}`}>
-            {isCreating && <label className="collection-basic-field">
-              <span>计划名称 <b>*</b></span>
-              <Input value={draft.name} maxLength={60} placeholder="例如：中国政府采购日常增量" onChange={(event) => updateDraft({ name: event.target.value, nameCustomized: true })} />
-            </label>}
+          <div className={`collection-basic-grid ${isCreating && !embedded ? 'existing' : 'single'}`}>
+            {isCreating && !embedded && (
+              <label className="collection-basic-field">
+                <span>关联网站 <b>*</b></span>
+                <Select
+                  showSearch
+                  optionFilterProp="label"
+                  value={draft.siteHost || undefined}
+                  options={siteOptions}
+                  placeholder="选择已完成规则发布的网站"
+                  onChange={updateDraftSite}
+                />
+                <small>{selectedRule ? `采集规则 ${selectedRule.id} · ${selectedRule.version}` : '仅可选择已经发布采集规则的网站'}</small>
+              </label>
+            )}
             <label className="collection-basic-field">
-              <span>关联网站 <b>*</b></span>
-              <Select
-                showSearch
-                optionFilterProp="label"
-                disabled={!isCreating}
-                value={draft.siteHost || undefined}
-                options={isCreating ? siteOptions : allSiteOptions}
-                placeholder="选择已完成规则发布的网站"
-                onChange={updateDraftSite}
-              />
-              <small>{selectedRule ? `采集规则 ${selectedRule.id} · ${selectedRule.version}` : '仅可选择已经发布采集规则的网站'}</small>
-            </label>
-            <label className="collection-basic-field">
-              <span>规则版本策略</span>
+              <span>版本策略</span>
               <Select value={draft.versionPolicy} options={['跟随最新发布', '固定当前版本'].map((value) => ({ value, label: value }))} onChange={(versionPolicy) => updateDraft({ versionPolicy })} />
-              <small>{draft.versionPolicy === '跟随最新发布' ? '规则发布后自动同步到本计划' : '始终使用创建时绑定的规则版本'}</small>
+              <small>{selectedRule ? `当前规则 ${selectedRule.id} · ${selectedRule.version}；` : ''}{draft.versionPolicy === '跟随最新发布' ? '规则发布后自动同步到本计划' : '始终使用创建时绑定的规则版本'}</small>
             </label>
           </div>
         </section>
@@ -696,7 +617,7 @@ export function TasksPage() {
             <Button disabled={!canCreateTask} onClick={() => createFromDraft(false)}>保存草稿</Button>
             <Button type="primary" icon={<SaveOutlined />} disabled={!canCreateTask} onClick={() => createFromDraft(true)}>保存并启用</Button>
           </> : <>
-            <Button onClick={() => setDraft(createDraft(selectedTask, selectedRule))}>重置</Button>
+            <Button onClick={() => setDraft(createDraft(selectedTask, selectedRule, selectedTaskSite))}>重置</Button>
             <Button type="primary" icon={<SaveOutlined />} onClick={() => saveConfig()}>保存配置</Button>
           </>}
         </div>
@@ -705,10 +626,10 @@ export function TasksPage() {
   }
 
   return (
-    <div className="page-content collection-page">
-      {(ruleFilter || taskFilter || siteFilter) && <Alert className="context-filter-alert" type="info" showIcon title={<>当前仅显示{ruleFilter ? '规则' : taskFilter ? '计划' : '网站'} <b className="mono">{ruleFilter || taskFilter || contextSite?.name || siteFilter}</b> 的采集计划</>} closable onClose={() => navigate('/tasks')} />}
+    <div className={embedded ? 'collection-page collection-config-embedded' : 'page-content collection-page'}>
+      {!embedded && (ruleFilter || taskFilter || siteFilter) && <Alert className="context-filter-alert" type="info" showIcon title={<>当前仅显示{ruleFilter ? '规则' : taskFilter ? '计划' : '网站'} <b className="mono">{ruleFilter || taskFilter || contextSite?.name || siteFilter}</b> 的采集计划</>} closable onClose={() => navigate('/tasks')} />}
 
-      <div className="collection-list-toolbar"><Segmented className="collection-filter" value={scope} onChange={setScope} options={['全部', '已启用', '已暂停', '异常', '全量采集', '定时增量']} /><div className="toolbar-spacer" /><Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新建计划</Button></div>
+      {!embedded && <div className="collection-list-toolbar"><Segmented className="collection-filter" value={scope} onChange={setScope} options={['全部', '已启用', '已暂停', '异常', '全量采集', '定时增量']} /><div className="toolbar-spacer" /><Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新建计划</Button></div>}
 
       {siteFilter && !visibleTasks.length ? (
         <section className="collection-table-surface collection-context-empty">
@@ -718,8 +639,8 @@ export function TasksPage() {
           >
             <Space wrap>
               {contextRuleReady && <Button type="primary" onClick={openCreate}>创建采集计划</Button>}
-              {contextRule && <Button type={contextRuleReady ? 'default' : 'primary'} onClick={() => navigate(getSiteRulePath(contextRule.siteHost))}>{contextRuleReady ? '查看网站规则' : '完成采集规则'}</Button>}
-              <Button onClick={() => navigate('/sites')}>返回网站管理</Button>
+              {(contextRule || embedded) && <Button type={contextRuleReady ? 'default' : 'primary'} onClick={() => navigate(embedded ? getSiteWorkspacePath(embeddedSite, 'rule') : getSiteRulePath(contextRule.siteHost))}>{contextRuleReady ? '查看采集规则' : '完成采集规则'}</Button>}
+              {!embedded && <Button onClick={() => navigate('/sites')}>返回网站管理</Button>}
             </Space>
           </Empty>
         </section>
@@ -732,7 +653,7 @@ export function TasksPage() {
             dataSource={pagedTasks}
             pagination={false}
             tableLayout="fixed"
-            scroll={{ x: 1180 }}
+            scroll={{ x: 730 }}
           />
         </section>
       )}

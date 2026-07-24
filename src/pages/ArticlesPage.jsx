@@ -1,8 +1,8 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, App as AntApp, Button, Descriptions, Modal, Segmented, Space, Table } from 'antd'
 import { CodeOutlined, CopyOutlined, ExportOutlined, LeftOutlined, MergeCellsOutlined, ToolOutlined } from '@ant-design/icons'
 import { useNavigate, useOutletContext, useParams, useSearchParams } from 'react-router-dom'
-import { PageTitle, RowActions, SectionCard, StatusTag } from '../components/ConsoleUI'
+import { EntityLink, PageTitle, RowActions, SectionCard, StatusTag } from '../components/ConsoleUI'
 import { usePrototype } from '../app/PrototypeContext'
 import { getSiteRulePath } from '../app/routes'
 
@@ -49,28 +49,36 @@ function ArticlesList() {
   const executionFilter = params.get('execution')
   const { articles } = usePrototype()
   const [scope, setScope] = useState('全部')
-  const visible = useMemo(() => articles.filter((article) => (
-    (!executionFilter || article.executionId === executionFilter) &&
-    (scope === '全部' || article.quality !== '通过') &&
-    `${article.id}${article.title}${article.site}${article.url}`.includes(search)
-  )), [articles, executionFilter, scope, search])
+  const visible = useMemo(() => articles.filter((article) => {
+    const needsHandling = ['内容噪声', '重复待确认'].includes(article.quality)
+    const matchesScope = scope === '全部'
+      || (scope === '需处理' && needsHandling)
+      || (scope === '多来源' && (article.dedup?.sourceCount || 1) > 1)
+    return (!executionFilter || article.executionId === executionFilter)
+      && matchesScope
+      && `${article.id}${article.title}${article.site}${article.url}${article.dedup?.canonicalId || ''}`.includes(search)
+  }), [articles, executionFilter, scope, search])
   const columns = [
     { title: 'ID', dataIndex: 'id', width: 110, render: (value) => <span className="mono">{value}</span> },
-    { title: '原文', dataIndex: 'title', width: 300, ellipsis: true, render: (value, row) => <button type="button" className="table-entity-link" onClick={() => navigate(`/articles/${row.id}`)}>{value}</button> },
+    { title: '原文', dataIndex: 'title', width: 340, render: (value, row) => <EntityLink title={value} onClick={() => navigate(`/articles/${row.id}`)} ariaLabel={`查看原文 ${value}`} /> },
     { title: '来源网站', dataIndex: 'site', width: 220 },
+    {
+      title: '归并状态',
+      width: 130,
+      render: (_, article) => <span className="article-merge-status">{(article.dedup?.sourceCount || 1) > 1 ? `${article.dedup.sourceCount} 个来源` : '单一来源'}</span>,
+    },
     { title: '发布时间', dataIndex: 'publishTime', width: 118, render: (value) => <span className="mono">{value}</span> },
-    { title: '采集时间', dataIndex: 'collectedAt', width: 112, render: (value) => <span className="mono muted">{value}</span> },
     { title: '质量', dataIndex: 'quality', width: 126, render: (value) => <StatusTag value={value} /> },
-    { title: '操作', width: 112, fixed: 'right', align: 'right', render: (_, row) => row.quality === '通过'
+    { title: '操作', width: 112, fixed: 'right', align: 'right', render: (_, row) => !['内容噪声', '重复待确认'].includes(row.quality)
       ? <span className="table-action-empty">—</span>
-      : <RowActions primary={{ label: '处理质量', onClick: () => navigate(`/articles/${row.id}`) }} /> },
+      : <RowActions primary={{ label: '处理质量', onClick: () => navigate(`/articles/${row.id}?focus=quality`) }} /> },
   ]
   return (
     <div className="page-content">
       {executionFilter && <Alert className="context-filter-alert" type="info" showIcon closable onClose={() => navigate('/articles')} title={<>当前仅显示执行 <b className="mono">{executionFilter}</b> 的入库原文</>} />}
-      <div className="list-toolbar"><Segmented value={scope} onChange={setScope} options={['全部', '需处理']} /><div className="toolbar-spacer" /><Button icon={<ExportOutlined />} onClick={() => message.success(`已生成 ${visible.length} 条原文的导出任务`)}>导出</Button></div>
+      <div className="list-toolbar"><Segmented value={scope} onChange={setScope} options={['全部', '需处理', '多来源']} /><div className="toolbar-spacer" /><Button icon={<ExportOutlined />} onClick={() => message.success(`已生成 ${visible.length} 条原文的导出任务`)}>导出</Button></div>
       <SectionCard bodyStyle={{ padding: 0 }}>
-        <Table rowKey="id" columns={columns} dataSource={visible} pagination={{ pageSize: 10, showSizeChanger: false }} scroll={{ x: 980 }} />
+        <Table rowKey="id" columns={columns} dataSource={visible} pagination={{ pageSize: 10, showSizeChanger: false }} scroll={{ x: 1156 }} />
       </SectionCard>
     </div>
   )
@@ -79,9 +87,14 @@ function ArticlesList() {
 function ArticleDetail({ article }) {
   const { message } = AntApp.useApp()
   const navigate = useNavigate()
+  const [params] = useSearchParams()
   const { resolveArticleQuality, rules } = usePrototype()
   const [duplicateOpen, setDuplicateOpen] = useState(false)
+  const qualitySectionRef = useRef(null)
+  const qualityFocused = params.get('focus') === 'quality' && ['内容噪声', '重复待确认'].includes(article.quality)
   const sourceRule = rules.find((rule) => rule.id === article.ruleId)
+  const dedup = article.dedup || {}
+  const duplicateCandidate = dedup.candidate
   const rawSource = getArticleSource(article, sourceRule)
   const sourceLines = rawSource.content.split('\n')
   const sourceBytes = new Blob([rawSource.content]).size
@@ -94,6 +107,11 @@ function ArticleDetail({ article }) {
     await navigator.clipboard.writeText(rawSource.content)
     message.success('原始内容已复制')
   }
+  useEffect(() => {
+    if (!qualityFocused || !qualitySectionRef.current) return undefined
+    const frame = window.requestAnimationFrame(() => qualitySectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }))
+    return () => window.cancelAnimationFrame(frame)
+  }, [article.id, qualityFocused])
   return (
     <div className="page-content detail-page article-detail-page">
       <div className="back-row"><Button icon={<LeftOutlined />} onClick={() => navigate('/articles')}>返回原文库</Button><span>原文详情</span></div>
@@ -119,22 +137,39 @@ function ArticleDetail({ article }) {
               { key: 'collected', label: '采集时间', children: article.collectedAt },
               { key: 'format', label: '内容格式', children: <span className={`article-source-kind ${rawSource.type}`}>{rawSource.type.toUpperCase()}</span> },
               { key: 'quality', label: '质量状态', children: <StatusTag value={article.quality} /> },
+              { key: 'canonical', label: '归并记录', children: <span className="mono">{dedup.canonicalId || '—'}</span> },
+              { key: 'sources', label: '来源数量', children: `${dedup.sourceCount || 1} 个网站来源` },
               { key: 'url', label: '原网页', children: <a href={article.url} target="_blank" rel="noreferrer">打开原网页 <ExportOutlined /></a> },
             ]} />
           </SectionCard>
           <SectionCard title={<PageTitle>来源与追溯</PageTitle>}>
             <div className="trace-links"><Button type="link" onClick={() => navigate(`/executions/${article.executionId}`)}>来源执行 <span className="mono">{article.executionId}</span></Button><Button type="link" onClick={() => navigate(siteRulePath)}>网站规则 <span className="mono">{article.ruleId}</span></Button></div>
+            <div className="article-dedup-trace">
+              <div><span>标准 URL</span><code>{dedup.normalizedUrl || article.url}</code></div>
+              <div><span>内容指纹</span><code>{dedup.fingerprint || '—'}</code></div>
+              <div><span>归并状态</span><strong>{dedup.status || '独立记录'}</strong></div>
+            </div>
           </SectionCard>
-          {article.quality !== '通过' && <SectionCard title={<PageTitle>质量处理</PageTitle>}>
-            <Alert type="warning" showIcon title={article.quality} description={article.quality === '内容噪声' ? '建议定位到产生该原文的规则，调整正文清洗规则并回归发布。' : '请对比候选内容，确认是否属于同一标讯。'} />
-            <div className="stack-actions">{article.quality === '内容噪声' ? <><Button block icon={<ToolOutlined />} onClick={() => navigate(siteRulePath)}>修复网站规则</Button><Button block onClick={resolveNoise}>标记本条已确认</Button></> : <Button block type="primary" icon={<MergeCellsOutlined />} onClick={() => setDuplicateOpen(true)}>处理重复候选</Button>}</div>
-          </SectionCard>}
+          {['内容噪声', '重复待确认'].includes(article.quality) && (
+            <div ref={qualitySectionRef} className={qualityFocused ? 'article-quality-focus' : ''}>
+              <SectionCard title={<PageTitle>质量处理</PageTitle>}>
+                <Alert type="warning" showIcon title={article.quality} description={article.quality === '内容噪声' ? '建议定位到产生该原文的规则，调整正文清洗规则并回归发布。' : '请对比候选内容，确认是否属于同一标讯。'} />
+                <div className="stack-actions">{article.quality === '内容噪声' ? <><Button block icon={<ToolOutlined />} onClick={() => navigate(siteRulePath)}>修复网站规则</Button><Button block onClick={resolveNoise}>标记本条已确认</Button></> : <Button block type="primary" icon={<MergeCellsOutlined />} onClick={() => setDuplicateOpen(true)}>处理重复候选</Button>}</div>
+              </SectionCard>
+            </div>
+          )}
         </aside>
       </div>
 
-      <Modal title="重复候选确认" open={duplicateOpen} onCancel={() => setDuplicateOpen(false)} footer={<Space><Button onClick={() => { resolveArticleQuality(article.id, '通过'); setDuplicateOpen(false); message.success('已确认不是重复') }}>不是重复</Button><Button type="primary" onClick={() => { resolveArticleQuality(article.id, '已合并'); setDuplicateOpen(false); message.success('已合并到推荐主记录，来源追溯保持不变') }}>合并到主记录</Button></Space>}>
-        <Alert type="info" showIcon title="标题相似度 96%，发布时间相同，正文哈希相似度 91%" />
-        <div className="duplicate-compare"><div><span>当前记录</span><strong>{article.id}</strong><p>{article.title}</p></div><div><span>推荐主记录</span><strong>AR-12472</strong><p>{article.title.replace('项目招标', '项目公开招标')}</p></div></div>
+      <Modal title="跨网站重复候选确认" open={duplicateOpen} onCancel={() => setDuplicateOpen(false)} footer={<Space><Button onClick={() => { resolveArticleQuality(article.id, '通过'); setDuplicateOpen(false); message.success('已确认不是重复，当前记录保持独立') }}>不是重复</Button><Button type="primary" onClick={() => { resolveArticleQuality(article.id, '已合并'); setDuplicateOpen(false); message.success('已归并到主记录，两个网站来源均已保留') }}>归并到主记录</Button></Space>}>
+        <Alert type="info" showIcon title="系统通过业务标识、标题与正文指纹发现跨网站重复内容" />
+        <div className="duplicate-signals">
+          <div><span>业务标识</span><strong className="mono">{dedup.signals?.businessKey || '未识别'}</strong></div>
+          <div><span>标题相似度</span><strong className="mono">{dedup.signals?.titleSimilarity || 0}%</strong></div>
+          <div><span>正文相似度</span><strong className="mono">{dedup.signals?.contentSimilarity || 0}%</strong></div>
+          <div><span>发布时间</span><strong>{dedup.signals?.samePublishDate ? '一致' : '不一致'}</strong></div>
+        </div>
+        <div className="duplicate-compare"><div><span>当前来源 · {article.site}</span><strong>{article.id}</strong><p>{article.title}</p></div><div><span>推荐主记录 · {duplicateCandidate?.site || '其他网站'}</span><strong>{duplicateCandidate?.id || '—'}</strong><p>{duplicateCandidate?.title || article.title}</p></div></div>
       </Modal>
     </div>
   )

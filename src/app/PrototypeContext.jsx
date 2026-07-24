@@ -9,9 +9,11 @@ import {
   initialUsers,
 } from '../mock/domainData'
 import { siteRows as initialSites } from '../data'
+import { initialSiteFolders, migrateSiteFolders } from './siteFolderModel'
 
 const PrototypeContext = createContext(null)
 const STORAGE_PREFIX = 'collector.v2.'
+export const ANALYSIS_CONCURRENCY_LIMIT = 20
 let analysisSequence = 0
 
 function nextAnalysisId(prefix) {
@@ -52,7 +54,7 @@ function createExecutionArticles(execution) {
   const collectedAt = formatTimestamp()
   const publishTime = new Date().toISOString().slice(0, 10)
   const titles = ['采购项目公开招标公告', '信息化服务项目竞争性磋商公告', '工程建设项目资格预审公告']
-  return titles.map((title, index) => ({
+  return titles.map((title, index) => enrichArticleDedup({
     id: `AR-${execution.id.replace('EX-', '')}-${index + 1}`,
     title: `${execution.site}${title}`,
     site: execution.site,
@@ -70,9 +72,81 @@ function createExecutionArticles(execution) {
 
 function deriveBatchStatus(urls) {
   if (urls.some((row) => row.status === '分析中')) return '分析中'
+  if (urls.some((row) => row.status === '排队中')) return '排队中'
+  if (urls.every((row) => row.status === '已取消')) return '已取消'
   if (urls.every((row) => row.status === '已通过')) return '已完成'
   if (urls.every((row) => ['审核完成', '已通过'].includes(row.status))) return '待发布'
   return '需处理'
+}
+
+function stableFingerprint(value) {
+  let hash = 2166136261
+  for (const character of String(value || '')) {
+    hash ^= character.charCodeAt(0)
+    hash = Math.imul(hash, 16777619)
+  }
+  return `FP-${(hash >>> 0).toString(16).padStart(8, '0').toUpperCase()}`
+}
+
+function canonicalizeArticleUrl(value) {
+  try {
+    const url = new URL(value)
+    url.hash = ''
+    ;['utm_source', 'utm_medium', 'utm_campaign', 'spm', 'from'].forEach((key) => url.searchParams.delete(key))
+    url.hostname = normalizeHost(url.hostname)
+    return url.toString()
+  } catch {
+    return String(value || '')
+  }
+}
+
+function enrichArticleDedup(article) {
+  const normalizedUrl = canonicalizeArticleUrl(article.url)
+  const fingerprint = stableFingerprint(`${article.title}|${article.publishTime}|${article.content}`)
+  if (article.id === 'AR-12480') {
+    return {
+      ...article,
+      dedup: {
+        canonicalId: 'DOC-00012472',
+        normalizedUrl,
+        fingerprint,
+        status: article.quality === '已合并' ? '已归并' : '候选重复',
+        sourceCount: 2,
+        duplicateOf: article.quality === '已合并' ? 'AR-12472' : '',
+        signals: {
+          titleSimilarity: 96,
+          contentSimilarity: 91,
+          samePublishDate: true,
+          businessKey: 'PROJECT-TRAFFIC-SIGNAL-2026',
+        },
+        candidate: {
+          id: 'AR-12472',
+          site: '市公共资源交易中心',
+          title: '智慧交通信号控制系统升级改造项目公开招标',
+          url: 'https://ggzy.example.gov.cn/project/12472',
+          canonicalId: 'DOC-00012472',
+        },
+      },
+    }
+  }
+  return {
+    ...article,
+    dedup: {
+      canonicalId: article.dedup?.canonicalId || `DOC-${stableFingerprint(`${article.title}|${article.publishTime}`).replace('FP-', '')}`,
+      normalizedUrl,
+      fingerprint,
+      status: article.dedup?.status || '独立记录',
+      sourceCount: article.dedup?.sourceCount || 1,
+      duplicateOf: article.dedup?.duplicateOf || '',
+      signals: article.dedup?.signals || null,
+      candidate: article.dedup?.candidate || null,
+    },
+  }
+}
+
+function migrateArticles(value) {
+  const articles = Array.isArray(value) ? value : initialArticles
+  return articles.map(enrichArticleDedup)
 }
 
 function getUrlHost(url) {
@@ -85,6 +159,28 @@ function getUrlHost(url) {
 
 function normalizeHost(host) {
   return String(host || '').toLowerCase().replace(/^www\./, '')
+}
+
+function migrateSites(value) {
+  const source = Array.isArray(value) ? value : initialSites
+  const seededIdByHost = new Map(initialSites.map((site) => [normalizeHost(site.host), site.id]))
+  const reservedIds = new Set(initialSites.map((site) => site.id))
+  const usedIds = new Set()
+  let nextNumber = Math.max(...source.map((site) => Number(String(site?.id || '').replace('WS-', '')) || 0), initialSites.length) + 1
+
+  return source.map((site, index) => {
+    const key = Number.isInteger(site?.key) ? site.key : index
+    const seededId = seededIdByHost.get(normalizeHost(site?.host))
+    let id = seededId || site?.id
+    if (!id || usedIds.has(id) || (!seededId && reservedIds.has(id))) {
+      do {
+        id = `WS-${String(nextNumber).padStart(3, '0')}`
+        nextNumber += 1
+      } while (usedIds.has(id) || reservedIds.has(id))
+    }
+    usedIds.add(id)
+    return { ...site, key, id }
+  })
 }
 
 function isAnalysisEntryActive(entry) {
@@ -121,15 +217,19 @@ function buildRuleYaml(config, siteName, entryUrl) {
   ].join('\n')
 }
 
-function usePersistentState(key, initialValue) {
+function usePersistentState(key, initialValue, migrate = (value) => value) {
   const [value, setValue] = useState(() => {
     try {
       const cached = window.localStorage.getItem(key)
-      return cached ? JSON.parse(cached) : initialValue
+      return migrate(cached ? JSON.parse(cached) : initialValue)
     } catch {
-      return initialValue
+      return migrate(initialValue)
     }
   })
+
+  useEffect(() => {
+    window.localStorage.setItem(key, JSON.stringify(value))
+  }, [key, value])
 
   const update = (nextValue) => {
     setValue((current) => {
@@ -146,13 +246,21 @@ export function PrototypeProvider({ children }) {
   const [rules, setRules] = usePersistentState(`${STORAGE_PREFIX}rules`, initialRules)
   const [tasks, setTasks] = usePersistentState(`${STORAGE_PREFIX}tasks`, initialTasks)
   const [executions, setExecutions] = usePersistentState(`${STORAGE_PREFIX}executions`, initialExecutions)
-  const [articles, setArticles] = usePersistentState(`${STORAGE_PREFIX}articles`, initialArticles)
+  const [articles, setArticles] = usePersistentState(`${STORAGE_PREFIX}articles`, initialArticles, migrateArticles)
   const [intakeBatches, setIntakeBatches] = usePersistentState(`${STORAGE_PREFIX}intake`, initialIntakeBatches)
-  const [sites, setSites] = usePersistentState(`${STORAGE_PREFIX}sites`, initialSites)
+  const [sites, setSites] = usePersistentState(`${STORAGE_PREFIX}sites`, initialSites, migrateSites)
+  const [siteFolders, setSiteFolders] = usePersistentState(`${STORAGE_PREFIX}site-folders`, initialSiteFolders, migrateSiteFolders)
   const [capabilities, setCapabilities] = usePersistentState(`${STORAGE_PREFIX}capabilities`, initialCapabilities)
   const [users, setUsers] = usePersistentState(`${STORAGE_PREFIX}users`, initialUsers)
   const [auditEvents, setAuditEvents] = usePersistentState(`${STORAGE_PREFIX}audit`, [])
   const [notificationCount, setNotificationCount] = useState(3)
+  const defaultSiteFolderId = siteFolders.find((folder) => folder.isDefault)?.id || initialSiteFolders[0].id
+
+  useEffect(() => {
+    setSites((items) => items.some((site) => !site.folderId)
+      ? items.map((site) => site.folderId ? site : { ...site, folderId: defaultSiteFolderId })
+      : items)
+  }, [defaultSiteFolderId])
 
   useEffect(() => {
     if (!tasks.some((task) => !task.bootstrapStatus)) return
@@ -352,7 +460,8 @@ export function PrototypeProvider({ children }) {
           name: importedName || (existingName && normalizeHost(existingName) !== host ? existingName : '待识别网站'),
           host,
           entryUrl,
-          entryUrls: [...new Set([...(existing.entryUrls || [existing.entryUrl].filter(Boolean)), entryUrl])],
+          entryUrls: [...new Set([...(existing.entryUrls || [existing.entryUrl].filter(Boolean)), ...(row.entryUrls || []), entryUrl])],
+          folderId: row.folderId || existing.folderId || defaultSiteFolderId,
           freq: String(row.freq || '').trim() || existing.freq || '待配置',
           importedAt: formatTimestamp(),
           importSource: source,
@@ -370,7 +479,8 @@ export function PrototypeProvider({ children }) {
         name: String(row.name || '').trim() || '待识别网站',
         host,
         entryUrl,
-        entryUrls: [entryUrl],
+        entryUrls: [...new Set([...(row.entryUrls || []), entryUrl])],
+        folderId: row.folderId || defaultSiteFolderId,
         status: '待分析',
         records: '—',
         freq: String(row.freq || '').trim() || '待配置',
@@ -389,17 +499,199 @@ export function PrototypeProvider({ children }) {
     return { created, updated, skipped, siteIds }
   }
 
-  const startSiteAnalysis = ({ siteName, siteHost, url, ruleId, kind = 'reanalyze', failureId = '', sourceExecutionId = '', parentAnalysisId = '', source = '' }) => {
+  const createSiteFolder = (name, parentId = null) => {
+    const normalizedName = String(name || '').trim()
+    if (!normalizedName) return { ok: false, reason: '请输入文件夹名称' }
+    const normalizedParentId = parentId && siteFolders.some((folder) => folder.id === parentId) ? parentId : null
+    if (siteFolders.some((folder) => folder.parentId === normalizedParentId && folder.name.toLowerCase() === normalizedName.toLowerCase())) {
+      return { ok: false, reason: '同级目录中已存在同名文件夹' }
+    }
+    const folder = {
+      id: `SF-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`}`,
+      name: normalizedName,
+      parentId: normalizedParentId,
+      isDefault: false,
+      sortOrder: Math.max(...siteFolders.filter((item) => item.parentId === normalizedParentId).map((item) => item.sortOrder || 0), -1) + 1,
+      createdAt: new Date().toISOString(),
+    }
+    setSiteFolders((items) => [...items, folder])
+    recordAudit('创建网站文件夹', normalizedName)
+    return { ok: true, folder }
+  }
+
+  const renameSiteFolder = (folderId, name) => {
+    const normalizedName = String(name || '').trim()
+    if (!normalizedName) return { ok: false, reason: '请输入文件夹名称' }
+    const target = siteFolders.find((folder) => folder.id === folderId)
+    if (!target) return { ok: false, reason: '文件夹不存在' }
+    if (siteFolders.some((folder) => folder.id !== folderId && folder.parentId === target.parentId && folder.name.toLowerCase() === normalizedName.toLowerCase())) {
+      return { ok: false, reason: '同级目录中已存在同名文件夹' }
+    }
+    setSiteFolders((items) => items.map((folder) => folder.id === folderId ? { ...folder, name: normalizedName } : folder))
+    recordAudit('重命名网站文件夹', normalizedName)
+    return { ok: true }
+  }
+
+  const deleteSiteFolder = (folderId) => {
+    const folder = siteFolders.find((item) => item.id === folderId)
+    if (!folder) return { ok: false, reason: '文件夹不存在' }
+    if (folder.isDefault) return { ok: false, reason: '默认文件夹不能删除，请先设置其他默认文件夹' }
+    setSiteFolders((items) => items
+      .filter((item) => item.id !== folderId)
+      .map((item) => item.parentId === folderId ? { ...item, parentId: folder.parentId } : item))
+    setSites((items) => items.map((site) => site.folderId === folderId
+      ? { ...site, folderId: folder.parentId || defaultSiteFolderId }
+      : site))
+    recordAudit('删除网站文件夹', folder.name)
+    return { ok: true, parentId: folder.parentId }
+  }
+
+  const setDefaultSiteFolder = (folderId) => {
+    const folder = siteFolders.find((item) => item.id === folderId)
+    if (!folder) return { ok: false, reason: '文件夹不存在' }
+    setSiteFolders((items) => items.map((item) => ({ ...item, isDefault: item.id === folderId })))
+    recordAudit('设置默认网站文件夹', folder.name)
+    return { ok: true }
+  }
+
+  const moveSitesToFolder = (siteHosts, folderId = defaultSiteFolderId) => {
+    const normalizedHosts = new Set(siteHosts.map(normalizeHost))
+    if (!normalizedHosts.size) return
+    const resolvedFolderId = siteFolders.some((item) => item.id === folderId) ? folderId : defaultSiteFolderId
+    const folder = siteFolders.find((item) => item.id === resolvedFolderId)
+    setSites((items) => items.map((site) => normalizedHosts.has(normalizeHost(site.host))
+      ? { ...site, folderId: resolvedFolderId }
+      : site))
+    recordAudit('批量移动网站到文件夹', `${normalizedHosts.size} 个/${folder?.name || '默认文件夹'}`)
+  }
+
+  const setSitesEnabled = (siteHosts, enabled) => {
+    const normalizedHosts = new Set(siteHosts.map(normalizeHost))
+    if (!normalizedHosts.size) return 0
+    setSites((items) => items.map((site) => normalizedHosts.has(normalizeHost(site.host))
+      ? { ...site, status: enabled ? '已完成' : '已停用' }
+      : site))
+    recordAudit(enabled ? '批量启用网站' : '批量停用网站', `${normalizedHosts.size} 个`)
+    return normalizedHosts.size
+  }
+
+  const createSiteAnalysisBatch = ({ rows, folderId = defaultSiteFolderId, source = 'AI 分析' }) => {
+    const activeByHost = new Map()
+    intakeBatches.forEach((batch) => {
+      batch.urls.forEach((entry) => {
+        const host = normalizeHost(entry.siteHost || getUrlHost(entry.url))
+        if (host && isAnalysisEntryActive(entry)) activeByHost.set(host, { batchId: batch.id, entryId: entry.id })
+      })
+    })
+    const siteByHost = new Map(sites.map((site) => [normalizeHost(site.host), site]))
+    const ruleByHost = new Map(rules.map((rule) => [normalizeHost(rule.siteHost), rule]))
+    const queuedHosts = new Set()
+    const seenHosts = new Set()
+    const entries = []
+    let reused = 0
+    let skipped = 0
+
+    rows.forEach((row) => {
+      const host = normalizeHost(row.host || getUrlHost(row.url))
+      if (!host || seenHosts.has(host)) {
+        skipped += 1
+        return
+      }
+      seenHosts.add(host)
+      if (activeByHost.has(host)) {
+        reused += 1
+        return
+      }
+      const site = siteByHost.get(host)
+      const rule = ruleByHost.get(host)
+      queuedHosts.add(host)
+      entries.push({
+        id: nextAnalysisId('URL'),
+        site: row.name || site?.name || '待识别网站',
+        siteHost: host,
+        url: row.url,
+        source,
+        judgment: '等待调度',
+        confidence: 0,
+        ruleId: rule?.id || '',
+        samples: 0,
+        status: '排队中',
+        issue: '',
+        analysisKind: rule ? 'reanalyze' : 'onboarding',
+        folderId: row.folderId || folderId || '',
+        queuedAt: Date.now(),
+      })
+    })
+
+    if (!entries.length) return { batchId: '', entryIds: [], firstHost: '', created: 0, reused, skipped }
+
+    const batchId = nextAnalysisId('IB')
+    const batch = {
+      id: batchId,
+      name: entries.length === 1 ? `${entries[0].site}分析任务` : `${source}批次 · ${entries.length} 个网站`,
+      status: '排队中',
+      createdAt: Date.now(),
+      updatedAt: '刚刚',
+      concurrency: ANALYSIS_CONCURRENCY_LIMIT,
+      paused: false,
+      urls: entries,
+    }
+    setIntakeBatches((items) => [batch, ...items])
+    setSites((items) => items.map((site) => queuedHosts.has(normalizeHost(site.host)) && site.status !== '异常'
+      ? { ...site, status: '分析中', ...(folderId ? { folderId } : {}) }
+      : site))
+    recordAudit('创建受控 AI 分析批次', `${batchId}/${entries.length} 个网站/并发 ${ANALYSIS_CONCURRENCY_LIMIT}`)
+    return { batchId, entryIds: entries.map((entry) => entry.id), firstHost: entries[0].siteHost, created: entries.length, reused, skipped }
+  }
+
+  const setAnalysisBatchPaused = (batchId, paused) => {
+    const batch = intakeBatches.find((item) => item.id === batchId)
+    if (!batch) return false
+    setIntakeBatches((items) => items.map((item) => item.id === batchId ? {
+      ...item,
+      paused,
+      updatedAt: '刚刚',
+    } : item))
+    recordAudit(paused ? '暂停 AI 分析批次' : '继续 AI 分析批次', batchId)
+    return true
+  }
+
+  const cancelAnalysisEntry = (batchId, entryId) => {
+    const batch = intakeBatches.find((item) => item.id === batchId)
+    const entry = batch?.urls.find((item) => item.id === entryId)
+    if (!entry || !['排队中', '分析中'].includes(entry.status)) return false
+    setIntakeBatches((items) => items.map((item) => {
+      if (item.id !== batchId) return item
+      const urls = item.urls.map((row) => row.id === entryId ? {
+        ...row,
+        status: '已取消',
+        readyAt: null,
+        completedAt: new Date().toISOString(),
+      } : row)
+      return { ...item, status: deriveBatchStatus(urls), urls, updatedAt: '刚刚' }
+    }))
+    recordAudit('取消 AI 分析任务', `${batchId}/${entryId}`)
+    return true
+  }
+
+  const startSiteAnalysis = ({ siteName, siteHost, url, ruleId, kind = 'reanalyze', failureId = '', sourceExecutionId = '', parentAnalysisId = '', source = '', folderId }) => {
     const normalizedHost = normalizeHost(siteHost || getUrlHost(url))
     const existing = intakeBatches.flatMap((batch) => batch.urls.map((entry) => ({ ...entry, batchId: batch.id })))
       .find((entry) => normalizeHost(entry.siteHost || getUrlHost(entry.url)) === normalizedHost && isAnalysisEntryActive(entry))
     if (existing) {
+      if (folderId !== undefined) {
+        setSites((items) => items.map((site) => normalizeHost(site.host) === normalizedHost ? { ...site, folderId } : site))
+        setIntakeBatches((batches) => batches.map((batch) => batch.id === existing.batchId ? {
+          ...batch,
+          urls: batch.urls.map((entry) => entry.id === existing.id ? { ...entry, folderId } : entry),
+        } : batch))
+      }
       if (kind === 'diagnose') {
         const shouldConvert = existing.analysisKind !== 'diagnose'
         const readyAt = Date.now() + 1400
         setIntakeBatches((batches) => batches.map((batch) => batch.id === existing.batchId ? {
           ...batch,
-          ...(shouldConvert ? { name: `${siteName}异常诊断`, status: '分析中', readyAt } : {}),
+          ...(shouldConvert ? { name: `${siteName}异常诊断`, status: '分析中', paused: false } : {}),
           updatedAt: '刚刚',
           urls: batch.urls.map((entry) => entry.id === existing.id ? {
             ...entry,
@@ -417,6 +709,7 @@ export function PrototypeProvider({ children }) {
               releasePhase: '',
               releaseVersion: '',
               releaseError: '',
+              readyAt,
             } : {}),
             analysisKind: 'diagnose',
             failureId: failureId || entry.failureId || '',
@@ -435,31 +728,34 @@ export function PrototypeProvider({ children }) {
     const batch = {
       id: batchId,
       name: kind === 'diagnose' ? `${siteName}异常诊断` : kind === 'onboarding' ? `${siteName}首次接入分析` : `${siteName}规则重新分析`,
-      status: '分析中',
+      status: '排队中',
       createdAt: Date.now(),
       updatedAt: '刚刚',
-      readyAt: Date.now() + 1400,
+      concurrency: 1,
+      paused: false,
       urls: [{
         id: entryId,
         site: siteName,
         siteHost: normalizedHost,
         url,
         source: source || (kind === 'diagnose' ? '失败队列' : '网站管理'),
-        judgment: '识别中',
+        judgment: '等待调度',
         confidence: 0,
         ruleId: targetRuleId,
         samples: 0,
-        status: '分析中',
+        status: '排队中',
         issue: '',
         analysisKind: kind,
         failureId,
         sourceExecutionId,
         parentAnalysisId,
+        folderId: folderId || '',
+        queuedAt: Date.now(),
       }],
     }
     setIntakeBatches((items) => [batch, ...items])
     setSites((items) => items.map((site) => normalizeHost(site.host) === normalizedHost && site.status !== '异常'
-      ? { ...site, status: '分析中', entryUrl: url }
+      ? { ...site, status: '分析中', entryUrl: url, ...(folderId !== undefined ? { folderId } : {}) }
       : site))
     recordAudit(kind === 'diagnose' ? '发起网站 AI 诊断' : kind === 'onboarding' ? '创建网站 AI 分析任务' : '发起网站 AI 重新分析', `${normalizedHost}/${targetRuleId || 'new-rule'}`)
     return { batchId, entryId }
@@ -593,7 +889,8 @@ export function PrototypeProvider({ children }) {
     const execution = {
       id: `EX-${nextNumber}`,
       taskId: task.id,
-      task: task.name,
+      task: `${task.site}采集计划`,
+      siteId: task.siteId || '',
       site: task.site,
       url: rule?.entryUrl || '-',
       ruleId: task.ruleId,
@@ -680,7 +977,27 @@ export function PrototypeProvider({ children }) {
   }
 
   const resolveArticleQuality = (articleId, quality) => {
-    setArticles((items) => items.map((article) => article.id === articleId ? { ...article, quality } : article))
+    setArticles((items) => items.map((article) => {
+      if (article.id !== articleId) return article
+      if (quality === '已合并' && article.dedup?.candidate) {
+        return {
+          ...article,
+          quality,
+          dedup: {
+            ...article.dedup,
+            status: '已归并',
+            canonicalId: article.dedup.candidate.canonicalId,
+            duplicateOf: article.dedup.candidate.id,
+            sourceCount: Math.max(2, article.dedup.sourceCount || 1),
+          },
+        }
+      }
+      return {
+        ...article,
+        quality,
+        dedup: article.dedup ? { ...article.dedup, status: quality === '通过' ? '非重复' : article.dedup.status } : article.dedup,
+      }
+    }))
     recordAudit('处理原文质量', articleId)
   }
 
@@ -691,6 +1008,7 @@ export function PrototypeProvider({ children }) {
     setArticles(initialArticles)
     setIntakeBatches(initialIntakeBatches)
     setSites(initialSites)
+    setSiteFolders(initialSiteFolders)
     setCapabilities(initialCapabilities)
     setUsers(initialUsers)
     setAuditEvents([])
@@ -777,25 +1095,50 @@ export function PrototypeProvider({ children }) {
   }, [executions])
 
   useEffect(() => {
-    const stalled = intakeBatches.filter((batch) => batch.status === '分析中' && !batch.readyAt)
-    if (!stalled.length) return
-    const stalledIds = new Set(stalled.map((batch) => batch.id))
-    setIntakeBatches((items) => items.map((batch) => stalledIds.has(batch.id) ? {
-      ...batch,
-      readyAt: Date.now() + 1400,
-      updatedAt: '刚刚',
-    } : batch))
+    const runningCount = intakeBatches.reduce((count, batch) => (
+      count + batch.urls.filter((entry) => entry.status === '分析中').length
+    ), 0)
+    let remainingCapacity = Math.max(0, ANALYSIS_CONCURRENCY_LIMIT - runningCount)
+    if (!remainingCapacity || !intakeBatches.some((batch) => !batch.paused && batch.urls.some((entry) => entry.status === '排队中'))) return
+
+    const startedAt = Date.now()
+    let changed = false
+    const nextBatches = intakeBatches.map((batch) => {
+      if (batch.paused || !remainingCapacity) return batch
+      const batchRunning = batch.urls.filter((entry) => entry.status === '分析中').length
+      let batchCapacity = Math.max(0, Math.min(batch.concurrency || ANALYSIS_CONCURRENCY_LIMIT, ANALYSIS_CONCURRENCY_LIMIT) - batchRunning)
+      if (!batchCapacity) return batch
+      const urls = batch.urls.map((entry) => {
+        if (entry.status !== '排队中' || !remainingCapacity || !batchCapacity) return entry
+        changed = true
+        remainingCapacity -= 1
+        batchCapacity -= 1
+        return {
+          ...entry,
+          status: '分析中',
+          judgment: '识别中',
+          startedAt,
+          readyAt: startedAt + 1400,
+        }
+      })
+      return urls === batch.urls ? batch : { ...batch, status: deriveBatchStatus(urls), urls, updatedAt: '刚刚' }
+    })
+    if (changed) setIntakeBatches(nextBatches)
   }, [intakeBatches])
 
   useEffect(() => {
-    const pending = intakeBatches.filter((batch) => batch.status === '分析中' && batch.readyAt)
+    const pending = intakeBatches.flatMap((batch) => batch.urls
+      .filter((entry) => entry.status === '分析中' && (entry.readyAt || batch.readyAt))
+      .map((entry) => ({ batchId: batch.id, entryId: entry.id, readyAt: entry.readyAt || batch.readyAt })))
     if (!pending.length) return undefined
-    const delay = Math.max(0, Math.min(...pending.map((batch) => batch.readyAt)) - Date.now())
+    const delay = Math.max(0, Math.min(...pending.map((entry) => entry.readyAt)) - Date.now())
     const timer = window.setTimeout(() => {
+      const now = Date.now()
+      const dueIds = new Set(pending.filter((entry) => entry.readyAt <= now).map((entry) => `${entry.batchId}/${entry.entryId}`))
+      if (!dueIds.size) return
       setIntakeBatches((items) => items.map((batch) => {
-        if (!batch.readyAt || batch.readyAt > Date.now()) return batch
         const urls = batch.urls.map((row) => {
-          if (row.status !== '分析中') return row
+          if (row.status !== '分析中' || !dueIds.has(`${batch.id}/${row.id}`)) return row
           const knownSite = row.site !== '待识别网站' && Boolean(row.analysisKind)
           return {
             ...row,
@@ -804,8 +1147,10 @@ export function PrototypeProvider({ children }) {
             confidence: 88,
             samples: 5,
             status: knownSite ? '待审核' : '待确认归属',
+            readyAt: null,
           }
         })
+        if (urls.every((row, index) => row === batch.urls[index])) return batch
         return {
           ...batch,
           status: deriveBatchStatus(urls),
@@ -854,6 +1199,7 @@ export function PrototypeProvider({ children }) {
             name: entry.site || '待识别网站',
             host,
             entryUrl: entry.url,
+            folderId: entry.folderId || defaultSiteFolderId,
             status: promotedStatus,
             records: '—',
             freq: matchedTask?.frequency || '待配置',
@@ -871,7 +1217,7 @@ export function PrototypeProvider({ children }) {
       })
       return changed ? nextSites : items
     })
-  }, [intakeBatches, tasks])
+  }, [defaultSiteFolderId, intakeBatches, tasks])
 
   const value = useMemo(() => ({
     rules,
@@ -880,6 +1226,8 @@ export function PrototypeProvider({ children }) {
     articles,
     intakeBatches,
     sites,
+    siteFolders,
+    defaultSiteFolderId,
     capabilities,
     users,
     auditEvents,
@@ -888,6 +1236,15 @@ export function PrototypeProvider({ children }) {
     updateBatchUrl,
     approveBatchUrl,
     importSites,
+    createSiteFolder,
+    renameSiteFolder,
+    deleteSiteFolder,
+    setDefaultSiteFolder,
+    moveSitesToFolder,
+    setSitesEnabled,
+    createSiteAnalysisBatch,
+    setAnalysisBatchPaused,
+    cancelAnalysisEntry,
     startSiteAnalysis,
     updateRule,
     runRegression,
@@ -902,7 +1259,7 @@ export function PrototypeProvider({ children }) {
     publishCapability,
     resolveArticleQuality,
     resetPrototype,
-  }), [rules, tasks, executions, articles, intakeBatches, sites, capabilities, users, auditEvents, notificationCount])
+  }), [rules, tasks, executions, articles, intakeBatches, sites, siteFolders, defaultSiteFolderId, capabilities, users, auditEvents, notificationCount])
 
   return <PrototypeContext.Provider value={value}>{children}</PrototypeContext.Provider>
 }

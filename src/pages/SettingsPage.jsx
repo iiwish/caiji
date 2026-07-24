@@ -80,7 +80,7 @@ export function SettingsPage() {
     }
   }
   const modelColumns = [
-    { title: '模型名称', dataIndex: 'name', width: 220, render: (value, model) => <div className="model-name-cell"><strong>{value}</strong><span className="mono">{model.id}</span></div> },
+    { title: '模型名称', dataIndex: 'name', width: 220, render: (value) => <strong className="table-single-value" title={value}>{value}</strong> },
     { title: '提供商', dataIndex: 'provider', width: 180 },
     { title: '模型编码', dataIndex: 'code', width: 190, render: (value) => <span className="mono model-code">{value}</span> },
     { title: '状态', dataIndex: 'status', width: 100, render: (value) => <Tag className={`model-status-tag ${value === '可用' ? 'available' : value === '降级' ? 'degraded' : 'disabled'}`}>{value}</Tag> },
