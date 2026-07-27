@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, App as AntApp, Button, Empty, Form, Input, Modal, Pagination, Progress, Segmented, Select, Table, Tooltip, Upload } from 'antd'
 import {
   ArrowLeftOutlined,
@@ -27,6 +27,13 @@ import { FolderTreeSelect } from '../components/FolderTreeSelect'
 import { ANALYSIS_CONCURRENCY_LIMIT, usePrototype } from '../app/PrototypeContext'
 import { getFolderPath, toFolderTreeSelectData } from '../app/siteFolderModel'
 import { getSiteWorkspacePath } from '../app/routes'
+import { entryUrlKey, normalizeEntryUrl } from '../app/urlIdentity'
+import {
+  approveBackendAnalysis,
+  createBackendAnalysis,
+  createBackendSite,
+  waitForBackendJob,
+} from '../app/localBackend'
 
 const hubeiSamples = [
   '关于市中心医院医疗设备采购项目的公开招标公告',
@@ -120,7 +127,7 @@ function analysisRowsFromMatrix(matrix) {
     const host = normalizeHost(getHost(url))
     return { name: values.find((_, index) => index !== urlIndex) || '', url, host }
   }).filter(Boolean)
-  return [...new Map(rows.map((row) => [row.host, row])).values()]
+  return [...new Map(rows.map((row) => [entryUrlKey(row.url), row])).values()]
 }
 
 function parseAnalysisRows(value) {
@@ -165,6 +172,45 @@ function formatAnalysisTime(entry) {
 
 function buildProfile(entry) {
   const host = getHost(entry.url)
+  const backendOutput = entry.backendOutput
+  const candidate = backendOutput?.candidate
+  if (candidate) {
+    const validation = backendOutput.validation || {}
+    const sampleRows = validation.sample_rows?.length
+      ? validation.sample_rows
+      : (backendOutput.samples || []).map((sample) => ({
+          title: sample.title,
+          url: sample.url,
+          published_at: '',
+        }))
+    const firstSample = sampleRows[0] || {}
+    const fields = [
+      { name: 'title', label: '标题', selector: candidate.list.title_selector, sample: firstSample.title || '已通过真实样本验证' },
+      { name: 'url', label: '详情链接', selector: candidate.list.link_selector, sample: firstSample.url || '已通过真实样本验证' },
+      {
+        name: 'pub_date',
+        label: '发布时间',
+        selector: candidate.list.date_selector || candidate.detail.published_at_selector,
+        sample: firstSample.published_at || '由详情页规则提取',
+      },
+      { name: 'raw', label: '正文', selector: candidate.detail.content_selector, sample: '真实详情页样本已验证', raw: true },
+    ]
+    return {
+      source: entry.backendSiteId || host.replace(/\W+/g, '_'),
+      confidence: Math.round(Number(candidate.confidence || 0) * 100),
+      fields,
+      samples: sampleRows.map((sample) => sample.title),
+      sampleRows,
+      container: candidate.list.item_selector,
+      nextPage: candidate.list.next_page_selector || null,
+      config: candidate,
+      rawContent: JSON.stringify({
+        evidence: '本地后端真实抓取与规则验证结果',
+        sample_count: backendOutput.sample_count,
+        validation,
+      }, null, 2),
+    }
+  }
   const known = analysisProfiles[host]
   const fallbackSamples = ['采购项目公开招标公告', '信息化服务竞争性磋商公告', '城市建设项目资格预审公告', '办公设备采购询价公告', '公共服务平台运维项目公告']
   const profile = known || {
@@ -207,11 +253,14 @@ function validateGeneratedConfig(configText) {
   } catch {
     return { passed: false, passedCount: 0, total: 20, reason: '采集配置不是有效的 JSON' }
   }
-  const required = [config?.list?.container, config?.fields?.title, config?.fields?.url]
+  const isBackendCandidate = Boolean(config?.list?.item_selector)
+  const required = isBackendCandidate
+    ? [config?.list?.item_selector, config?.list?.title_selector, config?.list?.link_selector, config?.detail?.content_selector]
+    : [config?.list?.container, config?.fields?.title, config?.fields?.url]
   if (required.some((value) => !String(value || '').trim())) {
     return { passed: false, passedCount: 12, total: 20, reason: '列表容器或必要字段配置不完整' }
   }
-  if (String(config.list.container).includes('div.m_list div.item')) {
+  if (String(config.list.container || '').includes('div.m_list div.item')) {
     return { passed: false, passedCount: 18, total: 20, reason: '仍有 2 个样本无法匹配当前列表选择器' }
   }
   return { passed: true, passedCount: 20, total: 20, reason: '结构、字段与质量门禁全部通过' }
@@ -236,6 +285,7 @@ export function AiAnalysisPage() {
     importSites,
     createSiteFolder,
     createSiteAnalysisBatch,
+    syncSiteAnalysisResult,
     setAnalysisBatchPaused,
     cancelAnalysisEntry,
     startSiteAnalysis,
@@ -260,8 +310,11 @@ export function AiAnalysisPage() {
   const [configDrafts, setConfigDrafts] = useState({})
   const [repairPrompt, setRepairPrompt] = useState('')
   const [workingUrlId, setWorkingUrlId] = useState('')
+  const [approvingUrlId, setApprovingUrlId] = useState('')
+  const [backendProgress, setBackendProgress] = useState({})
   const [handoffEntryId, setHandoffEntryId] = useState('')
   const [createForm] = Form.useForm()
+  const trackingJobIds = useRef(new Set())
 
   const allEntries = useMemo(() => intakeBatches.flatMap((batch) => batch.urls.map((url, urlIndex) => ({
     ...url,
@@ -295,7 +348,11 @@ export function AiAnalysisPage() {
   const visibleHistoricalEntries = useMemo(() => historicalEntries.filter((entry) => {
     const typeLabel = analysisTypeLabel(entry)
     const matchesType = historyType === '全部类型' || typeLabel === historyType
-    const matchesSite = !siteFilter || normalizeHost(getHost(entry.url)) === normalizeHost(siteFilter)
+    const normalizedFilterUrl = normalizeEntryUrl(siteFilter)
+    const matchesSite = !siteFilter
+      || (normalizedFilterUrl
+        ? entryUrlKey(entry.url) === normalizedFilterUrl
+        : normalizeHost(getHost(entry.url)) === normalizeHost(siteFilter))
     const matchesSearch = `${entry.site}${entry.url}${entry.batchName}${entry.status}${entry.ruleId || ''}${entry.releaseVersion || ''}`.toLowerCase().includes(search.toLowerCase())
     return matchesType && matchesSite && matchesSearch
   }), [historicalEntries, historyType, search, siteFilter])
@@ -314,13 +371,13 @@ export function AiAnalysisPage() {
     || (isHistoryView ? null : activeEntries.find((entry) => entry.id === selectedUrlId || entry.id === entryFilter) || activeEntries[0])
   const occupiedAnalysisEntries = useMemo(() => allEntries.filter((entry) => isActiveAnalysis(entry)
     || ['candidate', 'validation_failed', 'ready_to_publish'].includes(entry.releasePhase)), [allEntries])
-  const activeHosts = useMemo(() => new Set(occupiedAnalysisEntries.map((entry) => normalizeHost(getHost(entry.url)))), [occupiedAnalysisEntries])
+  const activeUrls = useMemo(() => new Set(occupiedAnalysisEntries.map((entry) => entryUrlKey(entry.url))), [occupiedAnalysisEntries])
   const availableSites = useMemo(() => sites
-    .filter((site) => site.host && !activeHosts.has(normalizeHost(site.host)))
+    .filter((site) => site.entryUrl && !activeUrls.has(entryUrlKey(site.entryUrl)))
     .map((site) => {
       const folderPath = getFolderPath(siteFolders, site.folderId)
-      return { value: site.id || site.host, label: `${site.name} · ${site.host}${folderPath ? ` · ${folderPath}` : ''}` }
-    }), [activeHosts, siteFolders, sites])
+      return { value: site.id || site.entryUrl, label: `${site.name} · ${site.entryUrl}${folderPath ? ` · ${folderPath}` : ''}` }
+    }), [activeUrls, siteFolders, sites])
   const folderTreeSelectData = useMemo(() => toFolderTreeSelectData(siteFolders), [siteFolders])
 
   useEffect(() => {
@@ -356,7 +413,11 @@ export function AiAnalysisPage() {
       if (requested.id !== selectedUrlId) setSelectedUrlId(requested.id)
       return
     }
-    const contextualEntry = activeEntries.find((entry) => normalizeHost(getHost(entry.url)) === normalizeHost(siteFilter))
+    const contextualEntry = activeEntries.find((entry) => (
+      normalizeEntryUrl(siteFilter)
+        ? entryUrlKey(entry.url) === entryUrlKey(siteFilter)
+        : normalizeHost(getHost(entry.url)) === normalizeHost(siteFilter)
+    ))
     const nextSelected = contextualEntry || activeEntries.find((entry) => entry.id === selectedUrlId) || activeEntries[0]
     if ((nextSelected?.id || '') !== selectedUrlId) setSelectedUrlId(nextSelected?.id || '')
   }, [activeEntries, allEntries, entryFilter, isHistoryView, selectedUrlId, siteFilter])
@@ -379,10 +440,21 @@ export function AiAnalysisPage() {
   const selectedFailure = selected?.failureId || fromFailure || ''
   const matchingTasks = selected ? tasks.filter((task) => task.site === selected.site || task.ruleId === selected.ruleId) : []
   const followingTasks = matchingTasks.filter((task) => task.versionPolicy === '跟随最新发布')
-  const automaticRegression = selected ? validateGeneratedConfig(configText) : { passed: false, passedCount: 0, total: 20, reason: '' }
+  const backendValidation = selected?.backendOutput?.validation
+  const backendDetailChecks = backendValidation?.detail_checks || []
+  const automaticRegression = backendValidation
+    ? {
+        passed: Boolean(backendValidation.passed),
+        passedCount: backendDetailChecks.filter((check) => check.passed).length,
+        total: backendDetailChecks.length,
+        reason: backendValidation.passed ? '真实样本的列表与详情规则均已通过' : '真实样本验证未通过',
+      }
+    : selected
+      ? validateGeneratedConfig(configText)
+      : { passed: false, passedCount: 0, total: 20, reason: '' }
 
   const paramsForEntry = (entry) => {
-    const nextParams = new URLSearchParams({ entry: entry.id, site: getHost(entry.url) })
+    const nextParams = new URLSearchParams({ entry: entry.id, site: entry.url })
     if (entry.analysisKind) nextParams.set('mode', entry.analysisKind)
     if (entry.failureId) nextParams.set('fromFailure', entry.failureId)
     if (entry.sourceExecutionId) nextParams.set('fromExecution', entry.sourceExecutionId)
@@ -399,31 +471,187 @@ export function AiAnalysisPage() {
 
   const updateSelected = (patch) => updateBatchUrl(selected.batchId, selected.id, patch)
 
-  const runAnalysis = (prompt = '', nextConfigText = configText) => {
-    setWorkingUrlId(selected.id)
-    updateSelected({ status: '分析中', issue: '', releasePhase: '', releaseVersion: '', releaseError: '' })
-    window.setTimeout(() => {
-      const validation = validateGeneratedConfig(nextConfigText)
-      updateBatchUrl(selected.batchId, selected.id, {
-        status: validation.passed ? '待审核' : '验证失败',
-        judgment: '已归属',
-        confidence: profile.confidence,
-        samples: 5,
-        issue: validation.passed ? '' : validation.reason,
-        aiRegression: validation.passed ? 'passed' : 'failed',
-        regressionPassed: validation.passedCount,
-        regressionTotal: validation.total,
+  const trackBackendJob = async ({ batchId, entryId, jobId, siteId, url, folderId }) => {
+    if (trackingJobIds.current.has(jobId)) return
+    trackingJobIds.current.add(jobId)
+    let lastStatus = ''
+    let lastProgress = -1
+    try {
+      const job = await waitForBackendJob(jobId, {
+        onProgress: (current) => {
+          const progress = current.progress || 0
+          if (progress !== lastProgress) {
+            lastProgress = progress
+            setBackendProgress((items) => ({ ...items, [entryId]: progress }))
+          }
+          const status = current.status === 'queued' ? '排队中' : '分析中'
+          if (status !== lastStatus) {
+            lastStatus = status
+            updateBatchUrl(batchId, entryId, { status, backendProgress: progress })
+          }
+        },
       })
-      setWorkingUrlId('')
-      if (validation.passed) message.success(prompt ? '二次分析及自动回归完成，请审核发布' : '重新分析及自动回归完成，请审核发布')
-      else message.error(`自动回归未通过：${validation.reason}`)
-    }, 900)
+      if (job.status !== 'succeeded') {
+        throw new Error(job.error_message || (job.status === 'cancelled' ? '任务已取消' : '真实分析任务执行失败'))
+      }
+      const candidate = job.output?.candidate
+      const validation = job.output?.validation
+      if (!candidate || !validation?.passed) throw new Error('后端没有返回可审核的规则候选')
+      const detailChecks = validation.detail_checks || []
+      const regressionPassed = detailChecks.filter((check) => check.passed).length
+      const regressionTotal = detailChecks.length
+      setConfigDrafts((items) => {
+        const next = { ...items }
+        delete next[entryId]
+        return next
+      })
+      syncSiteAnalysisResult({
+        host: getHost(url),
+        name: candidate.site_name,
+        entryUrl: url,
+        folderId,
+        backendSiteId: siteId,
+        status: '待审核',
+      })
+      updateBatchUrl(batchId, entryId, {
+        backendMode: true,
+        backendSiteId: siteId,
+        backendJobId: job.id,
+        backendOutput: job.output,
+        backendProgress: 100,
+        site: candidate.site_name,
+        status: '待审核',
+        judgment: '已归属',
+        confidence: Math.round(Number(candidate.confidence || 0) * 100),
+        samples: job.output.sample_count || validation.sample_rows?.length || 0,
+        issue: '',
+        approvedConfig: '',
+        aiRegression: 'passed',
+        regressionPassed,
+        regressionTotal,
+        completedAt: job.finished_at,
+      })
+      message.success(`${candidate.site_name}真实分析完成，请审核发布`)
+    } catch (error) {
+      updateBatchUrl(batchId, entryId, {
+        backendMode: true,
+        status: '验证失败',
+        issue: error.message || '真实分析任务执行失败',
+        readyAt: null,
+      })
+      message.error(error.message || '真实分析任务执行失败')
+    } finally {
+      trackingJobIds.current.delete(jobId)
+      setWorkingUrlId((current) => current === entryId ? '' : current)
+    }
   }
 
-  const approveSelected = () => {
+  const startBackendAnalysis = async ({ batchId, entryId, url, folderId }) => {
+    setWorkingUrlId(entryId)
+    updateBatchUrl(batchId, entryId, {
+      backendMode: true,
+      status: '分析中',
+      judgment: '连接本地后端',
+      issue: '',
+      approvedConfig: '',
+      releasePhase: '',
+      releaseVersion: '',
+      releaseError: '',
+      readyAt: null,
+    })
+    try {
+      const site = await createBackendSite(url)
+      syncSiteAnalysisResult({
+        host: site.normalized_host,
+        name: site.name === site.normalized_host ? undefined : site.name,
+        entryUrl: url,
+        folderId,
+        backendSiteId: site.id,
+        status: '分析中',
+      })
+      const job = await createBackendAnalysis(site.id, 3)
+      updateBatchUrl(batchId, entryId, {
+        backendSiteId: site.id,
+        backendJobId: job.id,
+        backendProgress: job.progress || 0,
+        status: job.status === 'queued' ? '排队中' : '分析中',
+        judgment: job.status === 'queued' ? '后端排队' : '真实分析中',
+      })
+      await trackBackendJob({ batchId, entryId, jobId: job.id, siteId: site.id, url, folderId })
+    } catch (error) {
+      updateBatchUrl(batchId, entryId, {
+        backendMode: true,
+        status: '验证失败',
+        issue: error.message || '无法连接本地后端',
+      })
+      setWorkingUrlId((current) => current === entryId ? '' : current)
+      message.error(error.message || '无法连接本地后端')
+    }
+  }
+
+  useEffect(() => {
+    allEntries
+      .filter((entry) => entry.backendMode && entry.backendJobId && ['排队中', '分析中'].includes(entry.status))
+      .forEach((entry) => {
+        void trackBackendJob({
+          batchId: entry.batchId,
+          entryId: entry.id,
+          jobId: entry.backendJobId,
+          siteId: entry.backendSiteId,
+          url: entry.url,
+          folderId: entry.folderId,
+        })
+      })
+  // The job id guard keeps this resume pass idempotent across local state updates.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allEntries])
+
+  const runAnalysis = () => {
+    void startBackendAnalysis({
+      batchId: selected.batchId,
+      entryId: selected.id,
+      url: selected.url,
+      folderId: selected.folderId,
+    })
+  }
+
+  const approveSelected = async () => {
     if (!automaticRegression.passed) return message.error(`自动回归未通过：${automaticRegression.reason}`)
+    if (selected.backendMode && selected.backendJobId) {
+      setApprovingUrlId(selected.id)
+      try {
+        const rule = await approveBackendAnalysis(selected.backendJobId)
+        const version = `v${rule.version}.0.0`
+        syncSiteAnalysisResult({
+          host: getHost(selected.url),
+          name: selected.site,
+          entryUrl: selected.url,
+          folderId: selected.folderId,
+          backendSiteId: selected.backendSiteId,
+          status: '已完成',
+        })
+        updateSelected({
+          ruleId: rule.id,
+          status: '已通过',
+          approvedConfig: configText,
+          releasePhase: 'published',
+          releaseVersion: version,
+          releaseError: '',
+        })
+        setParams(paramsForEntry(selected), { replace: true })
+        setHandoffEntryId(selected.id)
+        setEditingConfig(false)
+        message.success(`审核通过，真实规则 ${version} 已发布并生成采集计划`)
+      } catch (error) {
+        message.error(error.message || '真实规则发布失败')
+      } finally {
+        setApprovingUrlId('')
+      }
+      return
+    }
     const result = approveBatchUrl(selected.batchId, selected.id, configText)
     if (!result?.ok) return message.error(result?.reason || '审核失败，请重新加载后再试')
+    setParams(paramsForEntry(selected), { replace: true })
     setHandoffEntryId(selected.id)
     setEditingConfig(false)
     message.success(result.syncedTasks
@@ -499,7 +727,7 @@ export function AiAnalysisPage() {
     }
     const onboarding = selected.analysisKind === 'onboarding'
     if (onboarding || !matchingTasks.length) {
-      const site = sites.find((item) => normalizeHost(item.host) === normalizeHost(getHost(selected.url)))
+      const site = sites.find((item) => entryUrlKey(item.entryUrl) === entryUrlKey(selected.url))
       navigate(site ? getSiteWorkspacePath(site, 'plan') : '/sites')
       return
     }
@@ -542,8 +770,14 @@ export function AiAnalysisPage() {
     })
     setHandoffEntryId('')
     setSelectedUrlId(result.entryId)
-    navigate(`/ai?${new URLSearchParams({ entry: result.entryId, site: normalizeHost(getHost(entry.url)) }).toString()}`, { replace: true })
-    message.success(result.existing ? '已打开该网站的活动分析任务' : '重新分析任务已创建')
+    navigate(`/ai?${new URLSearchParams({ entry: result.entryId, site: entry.url }).toString()}`, { replace: true })
+    void startBackendAnalysis({
+      batchId: result.batchId,
+      entryId: result.entryId,
+      url: entry.url,
+      folderId: entry.folderId,
+    })
+    message.success(result.existing ? '已打开该网站的真实分析任务' : '真实重新分析任务已创建')
   }
 
   const restartHistoricalAnalysis = () => restartHistoricalEntry(selected)
@@ -581,23 +815,27 @@ export function AiAnalysisPage() {
       if (!rows.length) return message.warning('请输入至少一个有效的网站 URL')
       const folderRows = rows.map((row) => ({ ...row, folderId }))
       importSites(folderRows, 'AI 分析')
-      const result = createSiteAnalysisBatch({ rows: folderRows, folderId, source: 'AI 分析' })
-      if (!result.created) {
-        message.info(result.reused ? `${result.reused} 个网站已有活动分析任务，未重复创建` : '没有可创建的分析任务')
+      const result = createSiteAnalysisBatch({ rows: folderRows, folderId, source: 'AI 分析', backendMode: true })
+      const targets = [...(result.createdEntries || []), ...(result.reusedEntries || [])]
+      if (!targets.length) {
+        message.info('没有可创建的分析任务')
         return
       }
-      setSelectedUrlId(result.entryIds[0])
-      setParams(new URLSearchParams({ entry: result.entryIds[0], site: result.firstHost }), { replace: true })
+      setSelectedUrlId(targets[0].entryId)
+      setParams(new URLSearchParams({ entry: targets[0].entryId, site: targets[0].url }), { replace: true })
       setCreateOpen(false)
       createForm.resetFields()
       setCreateFileName('')
       setCreateFileRows([])
-      message.success(`分析批次已创建：${result.created} 个任务，最多并发 ${ANALYSIS_CONCURRENCY_LIMIT} 个${result.reused ? `，复用 ${result.reused} 个活动任务` : ''}`)
+      targets.forEach((target) => {
+        void startBackendAnalysis(target)
+      })
+      message.success(`已提交 ${targets.length} 个真实分析任务${result.reused ? `，其中复用 ${result.reused} 个活动任务` : ''}`)
       return
     }
     const site = sites.find((item) => (item.id || item.host) === values.siteId)
     if (!site) return message.error('网站资产不存在，请重新选择')
-    const rule = rules.find((item) => normalizeHost(item.siteHost) === normalizeHost(site.host))
+    const rule = rules.find((item) => item.siteId === site.id || entryUrlKey(item.entryUrl) === entryUrlKey(site.entryUrl))
     const result = startSiteAnalysis({
       siteName: site.name,
       siteHost: site.host,
@@ -608,12 +846,18 @@ export function AiAnalysisPage() {
       folderId,
     })
     setSelectedUrlId(result.entryId)
-    setParams(new URLSearchParams({ entry: result.entryId, site: site.host }), { replace: true })
+    setParams(new URLSearchParams({ entry: result.entryId, site: site.entryUrl }), { replace: true })
     setCreateOpen(false)
     createForm.resetFields()
     setCreateFileName('')
     setCreateFileRows([])
-    message.success(result.existing ? '已打开该网站的活动分析任务' : 'AI 分析任务已创建')
+    void startBackendAnalysis({
+      batchId: result.batchId,
+      entryId: result.entryId,
+      url: site.entryUrl || `https://${site.host}`,
+      folderId,
+    })
+    message.success(result.existing ? '已打开该网站的真实分析任务' : '真实 AI 分析任务已创建')
   }
 
   const closeCreateModal = () => {
@@ -760,7 +1004,7 @@ export function AiAnalysisPage() {
         <RowActions
           primary={{
             label: '查看结果',
-            onClick: () => navigate(`/ai/history?${new URLSearchParams({ entry: entry.id, site: normalizeHost(getHost(entry.url)) }).toString()}`),
+            onClick: () => navigate(`/ai/history?${new URLSearchParams({ entry: entry.id, site: entry.url }).toString()}`),
           }}
           menu={[{ key: 'restart', label: '重新分析', icon: <ReloadOutlined />, onClick: () => restartHistoricalEntry(entry) }]}
           moreLabel={`${entry.site} 更多操作`}
@@ -840,13 +1084,21 @@ export function AiAnalysisPage() {
     },
   ]
 
-  const sampleRows = profile.samples.map((title, index) => ({
-    id: index + 1,
-    title,
-    date: `2026-07-${String(16 - index).padStart(2, '0')}`,
-    url: `/notice/detail/${8842 - index * 7}.html`,
-    rawTag: profile.fields.find((field) => field.raw)?.selector.includes('json') ? 'raw_json' : 'raw_html',
-  }))
+  const sampleRows = profile.sampleRows?.length
+    ? profile.sampleRows.map((sample, index) => ({
+        id: index + 1,
+        title: sample.title,
+        date: sample.published_at || '—',
+        url: sample.url,
+        rawTag: '验证证据',
+      }))
+    : profile.samples.map((title, index) => ({
+        id: index + 1,
+        title,
+        date: `2026-07-${String(16 - index).padStart(2, '0')}`,
+        url: `/notice/detail/${8842 - index * 7}.html`,
+        rawTag: profile.fields.find((field) => field.raw)?.selector.includes('json') ? 'raw_json' : 'raw_html',
+      }))
   const sampleColumns = [
     { title: '#', dataIndex: 'id', width: 46, render: (value) => <span className="mono ai-row-number">{value}</span> },
     { title: '标题', dataIndex: 'title', render: (value) => <strong className="ai-sample-title">{value}</strong> },
@@ -870,6 +1122,14 @@ export function AiAnalysisPage() {
       : !automaticRegression.passed
         ? `自动回归未通过：${automaticRegression.reason}`
         : ''
+  const selectedBackendProgress = backendProgress[selected.id] ?? selected.backendProgress ?? (selected.status === '排队中' ? 0 : 1)
+  const pipelineSteps = [
+    { label: '加载入口页面', threshold: 30 },
+    { label: '识别列表容器', threshold: 55 },
+    { label: '推断字段选择器', threshold: 75 },
+    { label: '试采集与校验', threshold: 90 },
+    { label: '生成采集配置', threshold: 100 },
+  ]
   const queueBuckets = [
     { key: 'action', label: '需要处理', entries: visibleEntries.filter((entry) => !['分析中', '排队中'].includes(entry.status)) },
     { key: 'working', label: '分析中', entries: visibleEntries.filter((entry) => entry.status === '分析中') },
@@ -1002,7 +1262,7 @@ export function AiAnalysisPage() {
             ) : (
               <>
                 <Button icon={<ReloadOutlined />} disabled={isRestarting} onClick={() => runAnalysis()}>{selected.status === '分析中' ? '重新开始分析' : '重新分析'}</Button>
-                <Button type="primary" icon={<CheckOutlined />} title={reviewBlockedReason} disabled={Boolean(reviewBlockedReason)} onClick={approveSelected}>{selected.status === '待确认归属' ? '确认规则' : reviewBlockedReason ? '暂不可审核' : '审核通过'}</Button>
+                <Button type="primary" icon={<CheckOutlined />} loading={approvingUrlId === selected.id} title={reviewBlockedReason} disabled={Boolean(reviewBlockedReason)} onClick={approveSelected}>{selected.status === '待确认归属' ? '确认规则' : reviewBlockedReason ? '暂不可审核' : '审核通过'}</Button>
               </>
             )}
           </div>
@@ -1069,11 +1329,18 @@ export function AiAnalysisPage() {
           <section className="analysis-surface ai-pipeline-card">
             <header className="ai-section-header">
               <div><RobotOutlined /><h2>AI 分析流水线</h2><StatusTag value="分析中" /></div>
-              <span className="mono">3 / 5 样本页面已加载</span>
+              <span className="mono">{selected.backendMode ? `真实任务 ${selected.backendJobId || '创建中'} · ${selectedBackendProgress}%` : '3 / 5 样本页面已加载'}</span>
             </header>
-            <Progress percent={62} showInfo={false} />
+            <Progress percent={selected.backendMode ? selectedBackendProgress : 62} showInfo={false} />
             <div className="ai-pipeline-steps">
-              {['加载入口页面', '识别列表容器', '推断字段选择器', '试采集与校验', '生成采集配置'].map((step, index) => <div className={index < 2 ? 'done' : index === 2 ? 'active' : ''} key={step}><span>{index < 2 ? <CheckOutlined /> : index + 1}</span><strong>{step}</strong></div>)}
+              {pipelineSteps.map((step, index) => {
+                const done = selected.backendMode ? selectedBackendProgress >= step.threshold : index < 2
+                const previousThreshold = index ? pipelineSteps[index - 1].threshold : 0
+                const active = selected.backendMode
+                  ? selectedBackendProgress >= previousThreshold && selectedBackendProgress < step.threshold
+                  : index === 2
+                return <div className={done ? 'done' : active ? 'active' : ''} key={step.label}><span>{done ? <CheckOutlined /> : index + 1}</span><strong>{step.label}</strong></div>
+              })}
             </div>
           </section>
         ) : (
@@ -1100,6 +1367,8 @@ export function AiAnalysisPage() {
                 <div className="ai-config-actions">
                   {isHistorical ? (
                     <Button size="small" icon={<CopyOutlined />} onClick={copyConfig}>复制</Button>
+                  ) : selected.backendMode ? (
+                    <Button size="small" icon={<CopyOutlined />} onClick={copyConfig}>复制</Button>
                   ) : editingConfig ? (
                     <>
                       <Button size="small" icon={<CloseOutlined />} onClick={() => setEditingConfig(false)}>取消</Button>
@@ -1122,7 +1391,7 @@ export function AiAnalysisPage() {
               )}
             </section>
 
-            {!isHistorical && (
+            {!isHistorical && !selected.backendMode && (
               <section className="analysis-surface ai-correction-card">
                 <div className="ai-correction-title"><RobotOutlined /><h2>二次分析 · 修正提示词</h2></div>
                 <Input.TextArea rows={3} value={repairPrompt} onChange={(event) => setRepairPrompt(event.target.value)} placeholder="例如：列表容器应为 div.m_list，请重新定位「采购单位」字段…" />

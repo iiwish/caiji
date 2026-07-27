@@ -28,7 +28,13 @@ import {
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
 import { EntityLink, StatusTag } from '../components/ConsoleUI'
 import { usePrototype } from '../app/PrototypeContext'
-import { getSiteRulePath, getSiteWorkspacePath } from '../app/routes'
+import {
+  executeBackendSite,
+  saveBackendPlan,
+  waitForBackendJob,
+} from '../app/localBackend'
+import { getSiteWorkspacePath } from '../app/routes'
+import { entryUrlKey, findRuleForSite } from '../app/urlIdentity'
 
 const PAGE_SIZE = 10
 const DEDUP_FIELDS = ['url', 'title', 'pub_date', 'buyer', 'project_no', 'region']
@@ -86,6 +92,7 @@ function createDraft(task, rule, site) {
   return {
     isNew: false,
     name: defaultTaskName(site) || task.name,
+    siteId: site?.id || task.siteId || rule?.siteId || '',
     siteHost: rule?.siteHost || '',
     versionPolicy: task.versionPolicy || '跟随最新发布',
     enabled: task.status === '启用',
@@ -112,6 +119,7 @@ function createNewTaskDraft(site, sourceSiteFilter = '') {
     isNew: true,
     sourceSiteFilter,
     name: defaultTaskName(site),
+    siteId: site?.id || '',
     siteHost: site?.host || '',
     versionPolicy: '跟随最新发布',
     enabled: false,
@@ -128,19 +136,19 @@ function createNewTaskDraft(site, sourceSiteFilter = '') {
   }
 }
 
-export function TasksPage({ embeddedSiteId = '' }) {
+export function TasksPage({ embeddedSiteId = '', backendSiteId = '' }) {
   const { message } = AntApp.useApp()
   const navigate = useNavigate()
   const { search } = useOutletContext()
   const [params, setParams] = useSearchParams()
   const { tasks, rules, sites, executions, saveTask, createTask, runTask } = usePrototype()
   const embeddedSite = embeddedSiteId ? sites.find((site) => site.id === embeddedSiteId) : null
-  const embeddedRule = embeddedSite ? rules.find((rule) => rule.siteId === embeddedSite.id || rule.siteHost === embeddedSite.host) : null
-  const embeddedTask = embeddedSite ? tasks.find((task) => task.siteId === embeddedSite.id || task.site === embeddedSite.name || task.ruleId === embeddedRule?.id) : null
+  const embeddedRule = findRuleForSite(rules, embeddedSite)
+  const embeddedTask = embeddedSite ? tasks.find((task) => task.siteId === embeddedSite.id || task.ruleId === embeddedRule?.id) : null
   const embedded = Boolean(embeddedSite)
   const ruleFilter = embedded ? null : params.get('rule')
   const taskFilter = embedded ? embeddedTask?.id || null : params.get('task')
-  const siteFilter = embedded ? embeddedSite.host : params.get('site')
+  const siteFilter = embedded ? embeddedSite.id : params.get('site')
   const contextRuleReadyForEmbedded = isRuleReady(embeddedRule)
   const createRequested = embedded ? Boolean(!embeddedTask && contextRuleReadyForEmbedded) : params.get('create') === '1'
   const setupMode = embedded && !embeddedTask ? 'onboarding' : params.get('setup')
@@ -148,23 +156,25 @@ export function TasksPage({ embeddedSiteId = '' }) {
   const [page, setPage] = useState(1)
   const [selectedTaskId, setSelectedTaskId] = useState(taskFilter || null)
   const [draft, setDraft] = useState(null)
+  const [backendWorking, setBackendWorking] = useState(false)
   const selectedTask = tasks.find((task) => task.id === selectedTaskId) || null
-  const contextSite = embeddedSite || (siteFilter ? sites.find((site) => site.host === siteFilter) : null)
-  const contextRule = embeddedRule || (siteFilter ? rules.find((rule) => rule.siteHost === siteFilter) : null)
+  const contextSite = embeddedSite || (siteFilter ? sites.find((site) => site.id === siteFilter || entryUrlKey(site.entryUrl) === entryUrlKey(siteFilter) || site.host === siteFilter) : null)
+  const contextRule = embeddedRule || findRuleForSite(rules, contextSite)
   const contextRuleReady = isRuleReady(contextRule)
   const selectedRule = selectedTask
     ? rules.find((rule) => rule.id === selectedTask.ruleId)
     : draft?.isNew
-      ? rules.find((rule) => rule.siteHost === draft.siteHost)
+      ? findRuleForSite(rules, sites.find((site) => site.id === draft.siteId))
       : null
   const selectedTaskSite = selectedTask
     ? sites.find((site) => site.id === selectedTask.siteId
-      || site.name === selectedTask.site
-      || site.host === selectedRule?.siteHost)
+      || site.id === selectedRule?.siteId
+      || entryUrlKey(site.entryUrl) === entryUrlKey(selectedRule?.entryUrl)
+      || (!selectedTask.siteId && !selectedRule?.siteId && site.name === selectedTask.site))
     : null
   const siteOptions = useMemo(() => sites
-    .filter((site) => isRuleReady(rules.find((rule) => rule.siteHost === site.host)) && !tasks.some((task) => task.site === site.name))
-    .map((site) => ({ value: site.host, label: `${site.name} · ${site.host}` })), [rules, sites, tasks])
+    .filter((site) => isRuleReady(findRuleForSite(rules, site)) && !tasks.some((task) => task.siteId === site.id))
+    .map((site) => ({ value: site.id, label: `${site.name} · ${site.entryUrl}` })), [rules, sites, tasks])
 
   const visibleTasks = useMemo(() => tasks.filter((task) => {
     const matchesScope = scope === '全部'
@@ -174,12 +184,14 @@ export function TasksPage({ embeddedSiteId = '' }) {
       || (scope === '全量采集' && getTaskCollectionMode(task) === '全量')
       || (scope === '定时增量' && getTaskCollectionMode(task) === '增量')
     const taskRule = rules.find((rule) => rule.id === task.ruleId)
-    const taskSite = sites.find((site) => site.id === task.siteId || site.name === task.site || site.host === taskRule?.siteHost)
-    const taskHost = taskSite?.host || taskRule?.siteHost
+    const taskSite = sites.find((site) => site.id === task.siteId
+      || site.id === taskRule?.siteId
+      || entryUrlKey(site.entryUrl) === entryUrlKey(taskRule?.entryUrl)
+      || (!task.siteId && !taskRule?.siteId && site.name === task.site))
     const taskName = defaultTaskName(taskSite) || task.name
     return (!ruleFilter || task.ruleId === ruleFilter)
       && (!taskFilter || task.id === taskFilter)
-      && (!siteFilter || taskHost === siteFilter)
+      && (!siteFilter || taskSite?.id === siteFilter || entryUrlKey(taskSite?.entryUrl) === entryUrlKey(siteFilter) || taskSite?.host === siteFilter)
       && matchesScope
       && `${task.id}${taskName}${task.site}${task.ruleId}`.toLowerCase().includes(search.trim().toLowerCase())
   }), [tasks, rules, sites, ruleFilter, taskFilter, siteFilter, scope, search])
@@ -215,7 +227,10 @@ export function TasksPage({ embeddedSiteId = '' }) {
 
   const openConfig = (task) => {
     const rule = rules.find((item) => item.id === task.ruleId)
-    const site = sites.find((item) => item.id === task.siteId || item.name === task.site || item.host === rule?.siteHost)
+    const site = sites.find((item) => item.id === task.siteId
+      || item.id === rule?.siteId
+      || entryUrlKey(item.entryUrl) === entryUrlKey(rule?.entryUrl)
+      || (!task.siteId && !rule?.siteId && item.name === task.site))
     setSelectedTaskId(task.id)
     setDraft(createDraft(task, rule, site))
     if (!embedded) {
@@ -235,11 +250,12 @@ export function TasksPage({ embeddedSiteId = '' }) {
 
   const updateDraft = (patch) => setDraft((current) => ({ ...current, ...patch }))
 
-  const updateDraftSite = (siteHost) => {
-    const site = sites.find((item) => item.host === siteHost)
+  const updateDraftSite = (siteId) => {
+    const site = sites.find((item) => item.id === siteId)
     setDraft((current) => ({
       ...current,
-      siteHost,
+      siteId,
+      siteHost: site?.host || '',
       name: defaultTaskName(site),
     }))
   }
@@ -284,7 +300,7 @@ export function TasksPage({ embeddedSiteId = '' }) {
       ? draft.headers.filter((header) => header.name.trim() && header.value.trim())
       : []
     const authEnabled = draft.customHeadersEnabled || Boolean(draft.authFunctionId)
-    const site = sites.find((item) => item.host === draft.siteHost) || selectedTaskSite
+    const site = sites.find((item) => item.id === draft.siteId) || selectedTaskSite
     return {
       name: defaultTaskName(site),
       versionPolicy: draft.versionPolicy,
@@ -336,15 +352,15 @@ export function TasksPage({ embeddedSiteId = '' }) {
     navigate(`/tasks?${nextParams.toString()}`)
   }
 
-  const createFromDraft = (enabled) => {
+  const createFromDraft = async (enabled) => {
     const patch = getConfigPatch(enabled)
-    const site = sites.find((item) => item.host === draft.siteHost)
-    const rule = rules.find((item) => item.siteHost === draft.siteHost)
+    const site = sites.find((item) => item.id === draft.siteId)
+    const rule = findRuleForSite(rules, site)
     if (!site || !isRuleReady(rule)) {
       message.warning('请选择已经发布采集规则的网站')
       return
     }
-    const existingTask = tasks.find((task) => task.siteId === site.id || task.site === site.name)
+    const existingTask = tasks.find((task) => task.siteId === site.id)
     if (existingTask) {
       message.info('该网站已经配置采集计划，已打开现有配置')
       navigate(embedded ? getSiteWorkspacePath(site, 'plan') : `/tasks?task=${encodeURIComponent(existingTask.id)}`)
@@ -354,6 +370,16 @@ export function TasksPage({ embeddedSiteId = '' }) {
       message.warning('请填写至少一组完整的自定义 Header，或关闭该选项')
       return
     }
+    if (backendSiteId) {
+      setBackendWorking(true)
+      try {
+        await saveBackendPlan(backendSiteId, { enabled, sampleLimit: 3 })
+      } catch (error) {
+        message.error(error.message || '真实采集计划保存失败')
+        setBackendWorking(false)
+        return
+      }
+    }
     const taskId = createTask({
       ...patch,
       site: site.name,
@@ -362,23 +388,61 @@ export function TasksPage({ embeddedSiteId = '' }) {
       ruleVersion: rule.version,
     })
     setSelectedTaskId(taskId)
-    message.success(enabled ? `采集计划 ${taskId} 已创建并启用` : `采集计划 ${taskId} 已保存为草稿`)
+    setBackendWorking(false)
+    message.success(enabled
+      ? `${backendSiteId ? '真实' : ''}采集计划 ${taskId} 已创建并启用`
+      : `采集计划 ${taskId} 已保存为草稿`)
     navigate(embedded ? getSiteWorkspacePath(site, 'plan') : `/tasks?task=${taskId}${setupMode ? `&setup=${encodeURIComponent(setupMode)}` : ''}`)
   }
 
-  const runNow = () => {
+  const runNow = async () => {
     if (!draft.enabled || selectedRule?.status === '需修复') {
       message.warning('请先启用采集计划，并确保绑定规则可用')
       return
     }
     const patch = saveConfig(false)
     if (!patch) return
+    if (backendSiteId) {
+      setBackendWorking(true)
+      try {
+        await saveBackendPlan(backendSiteId, { enabled: true, sampleLimit: 3 })
+        const job = await executeBackendSite(backendSiteId, 3)
+        message.success(`真实采集任务 ${job.id} 已进入采集队列`)
+        const completed = await waitForBackendJob(job.id)
+        if (completed.status !== 'succeeded') throw new Error(completed.error_message || '真实采集任务执行失败')
+        message.success(`真实采集完成，入库 ${completed.output?.inserted_count || 0} 条`)
+        navigate(getSiteWorkspacePath(draftSite, 'executions'))
+      } catch (error) {
+        message.error(error.message || '真实采集任务执行失败')
+      } finally {
+        setBackendWorking(false)
+      }
+      return
+    }
     const executionId = runTask(selectedTask.id, '', patch)
     if (!executionId) {
       message.warning('当前配置暂时无法执行')
       return
     }
     message.success(`配置已保存，${draft.collectionMode === '全量' ? '全量' : '增量'}采集批次 ${executionId} 已启动`)
+  }
+
+  const saveCurrentConfig = async () => {
+    const patch = saveConfig(false)
+    if (!patch) return
+    if (!backendSiteId) {
+      message.success('采集配置已保存')
+      return
+    }
+    setBackendWorking(true)
+    try {
+      await saveBackendPlan(backendSiteId, { enabled: draft.enabled, sampleLimit: 3 })
+      message.success('真实采集计划配置已保存')
+    } catch (error) {
+      message.error(error.message || '真实采集计划保存失败')
+    } finally {
+      setBackendWorking(false)
+    }
   }
 
   const columns = [
@@ -393,7 +457,10 @@ export function TasksPage({ embeddedSiteId = '' }) {
       width: 220,
       render: (_, task) => {
         const rule = rules.find((item) => item.id === task.ruleId)
-        const site = sites.find((item) => item.id === task.siteId || item.name === task.site || item.host === rule?.siteHost)
+        const site = sites.find((item) => item.id === task.siteId
+          || item.id === rule?.siteId
+          || entryUrlKey(item.entryUrl) === entryUrlKey(rule?.entryUrl)
+          || (!task.siteId && !rule?.siteId && item.name === task.site))
         const taskName = defaultTaskName(site) || task.name
         return <EntityLink title={taskName} onClick={() => openConfig(task)} ariaLabel={`配置采集计划 ${taskName}`} />
       },
@@ -421,9 +488,9 @@ export function TasksPage({ embeddedSiteId = '' }) {
   ]
   const boundAuthFunction = draft ? AUTH_FUNCTIONS.find((item) => item.value === draft.authFunctionId) : null
   const isCreating = Boolean(createRequested && draft?.isNew)
-  const draftSite = draft?.siteHost ? sites.find((site) => site.host === draft.siteHost) : selectedTaskSite
+  const draftSite = draft?.siteId ? sites.find((site) => site.id === draft.siteId) : selectedTaskSite
   const taskDisplayName = defaultTaskName(draftSite) || '采集计划'
-  const canCreateTask = Boolean(isCreating && draft.siteHost && isRuleReady(selectedRule))
+  const canCreateTask = Boolean(isCreating && draft.siteId && isRuleReady(selectedRule))
   if ((selectedTask || isCreating) && draft) {
     return (
       <div className={embedded ? 'collection-config-page collection-config-embedded' : 'page-content collection-config-page'}>
@@ -456,7 +523,7 @@ export function TasksPage({ embeddedSiteId = '' }) {
               {selectedRule?.status === '需修复' && <StatusTag value="规则异常" />}
               <span>计划状态</span>
               <Switch aria-label={`启用采集计划：${taskDisplayName}`} checked={draft.enabled} onChange={(enabled) => updateDraft({ enabled })} />
-              <Button type="primary" icon={<CaretRightOutlined />} disabled={!draft.enabled || selectedRule?.status === '需修复'} onClick={runNow}>{setupMode === 'onboarding' ? '开始首次采集' : '立即执行'}</Button>
+              <Button type="primary" loading={backendWorking} icon={<CaretRightOutlined />} disabled={!draft.enabled || selectedRule?.status === '需修复'} onClick={() => void runNow()}>{setupMode === 'onboarding' ? '开始首次采集' : '立即执行'}</Button>
             </>}
           </div>
         </section>
@@ -475,7 +542,7 @@ export function TasksPage({ embeddedSiteId = '' }) {
                 <Select
                   showSearch
                   optionFilterProp="label"
-                  value={draft.siteHost || undefined}
+                  value={draft.siteId || undefined}
                   options={siteOptions}
                   placeholder="选择已完成规则发布的网站"
                   onChange={updateDraftSite}
@@ -614,11 +681,11 @@ export function TasksPage({ embeddedSiteId = '' }) {
         <div className="collection-save-bar">
           {isCreating ? <>
             <Button onClick={backToList}>取消</Button>
-            <Button disabled={!canCreateTask} onClick={() => createFromDraft(false)}>保存草稿</Button>
-            <Button type="primary" icon={<SaveOutlined />} disabled={!canCreateTask} onClick={() => createFromDraft(true)}>保存并启用</Button>
+            <Button loading={backendWorking} disabled={!canCreateTask} onClick={() => void createFromDraft(false)}>保存草稿</Button>
+            <Button type="primary" loading={backendWorking} icon={<SaveOutlined />} disabled={!canCreateTask} onClick={() => void createFromDraft(true)}>保存并启用</Button>
           </> : <>
             <Button onClick={() => setDraft(createDraft(selectedTask, selectedRule, selectedTaskSite))}>重置</Button>
-            <Button type="primary" icon={<SaveOutlined />} onClick={() => saveConfig()}>保存配置</Button>
+            <Button type="primary" loading={backendWorking} icon={<SaveOutlined />} onClick={() => void saveCurrentConfig()}>保存配置</Button>
           </>}
         </div>
       </div>
@@ -639,7 +706,7 @@ export function TasksPage({ embeddedSiteId = '' }) {
           >
             <Space wrap>
               {contextRuleReady && <Button type="primary" onClick={openCreate}>创建采集计划</Button>}
-              {(contextRule || embedded) && <Button type={contextRuleReady ? 'default' : 'primary'} onClick={() => navigate(embedded ? getSiteWorkspacePath(embeddedSite, 'rule') : getSiteRulePath(contextRule.siteHost))}>{contextRuleReady ? '查看采集规则' : '完成采集规则'}</Button>}
+              {(contextRule || embedded) && <Button type={contextRuleReady ? 'default' : 'primary'} onClick={() => navigate(getSiteWorkspacePath(embeddedSite || contextSite, 'rule'))}>{contextRuleReady ? '查看采集规则' : '完成采集规则'}</Button>}
               {!embedded && <Button onClick={() => navigate('/sites')}>返回网站管理</Button>}
             </Space>
           </Empty>

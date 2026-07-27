@@ -206,10 +206,15 @@ export function FailuresPage() {
 
   const getIncidentContext = (incident) => {
     if (!incident) return { site: null, rule: null, relatedTasks: [], sourceExecution: null }
-    const site = sites.find((item) => item.name === incident.site)
-    const rule = rules.find((item) => item.site === incident.site || (site && item.siteHost === site.host))
-    const relatedTasks = tasks.filter((task) => task.site === incident.site || task.ruleId === rule?.id)
     const sourceExecution = executions.find((execution) => execution.site === incident.site && ['失败', '部分失败'].includes(execution.status))
+    const sourceTask = tasks.find((task) => task.id === sourceExecution?.taskId)
+    const rule = rules.find((item) => item.id === sourceTask?.ruleId)
+      || rules.find((item) => item.site === incident.site)
+    const site = sites.find((item) => item.id === sourceExecution?.siteId
+      || item.id === sourceTask?.siteId
+      || item.id === rule?.siteId)
+      || sites.find((item) => item.name === incident.site)
+    const relatedTasks = tasks.filter((task) => task.siteId === site?.id || task.ruleId === rule?.id || (!task.siteId && task.site === incident.site))
     return { site, rule, relatedTasks, sourceExecution }
   }
 
@@ -271,7 +276,12 @@ export function FailuresPage() {
         sourceExecutionId: context.sourceExecution?.id || '',
         folderId: context.site.folderId,
       })
-      const params = new URLSearchParams({ entry: result.entryId, site: context.site.host, mode: 'diagnose', fromFailure: incident.id })
+      const params = new URLSearchParams({
+        entry: result.entryId,
+        site: context.rule?.entryUrl || context.site.entryUrl || `https://${context.site.host}`,
+        mode: 'diagnose',
+        fromFailure: incident.id,
+      })
       if (context.sourceExecution) params.set('fromExecution', context.sourceExecution.id)
       return { ...result, url: `/ai?${params.toString()}`, incidentIds, site: context.site.name }
     })

@@ -29,13 +29,14 @@ export function SiteRulePanel({ site, rule, standalone = false, onOpenPlan }) {
   const fromExecutionId = params.get('fromExecution')
   const fromFailureId = params.get('fromFailure')
   const editRequested = params.get('edit') === '1'
+  const isBackendRule = Boolean(rule?.backendMode)
   const sourceExecution = executions.find((execution) => execution.id === fromExecutionId)
   const boundTasks = tasks.filter((task) => task.siteId === site.id || task.site === site.name || task.ruleId === rule?.id)
 
   useEffect(() => {
-    setEditing(editRequested)
+    setEditing(editRequested && !isBackendRule)
     setDraft(rule?.yaml || '')
-  }, [rule?.id, rule?.yaml, editRequested])
+  }, [rule?.id, rule?.yaml, editRequested, isBackendRule])
 
   const beginAnalysis = (kind) => {
     const url = rule?.entryUrl || site.entryUrl || `https://${site.host}`
@@ -49,7 +50,7 @@ export function SiteRulePanel({ site, rule, standalone = false, onOpenPlan }) {
       sourceExecutionId: fromExecutionId || '',
       folderId: site.folderId,
     })
-    navigate(`/ai?entry=${encodeURIComponent(result.entryId)}&site=${encodeURIComponent(site.host)}&mode=${kind}${fromExecutionId ? `&fromExecution=${encodeURIComponent(fromExecutionId)}` : ''}`)
+    navigate(`/ai?entry=${encodeURIComponent(result.entryId)}&site=${encodeURIComponent(url)}&mode=${kind}${fromExecutionId ? `&fromExecution=${encodeURIComponent(fromExecutionId)}` : ''}`)
   }
 
   if (!rule) {
@@ -140,7 +141,7 @@ export function SiteRulePanel({ site, rule, standalone = false, onOpenPlan }) {
         </div>
         <Space wrap>
           {(boundTasks.length > 0 || ruleReady) && <Button onClick={openPlans}>{boundTasks.length ? '查看采集计划' : '创建采集计划'}</Button>}
-          {!editing && <Button icon={<EditOutlined />} onClick={() => { setDraft(rule.yaml); setEditing(true) }}>编辑规则</Button>}
+          {!editing && !isBackendRule && <Button icon={<EditOutlined />} onClick={() => { setDraft(rule.yaml); setEditing(true) }}>编辑规则</Button>}
           {rule.status !== '需修复' && <Tooltip title="重新识别页面结构并生成候选规则，不影响当前生产版本"><Button aria-label="AI 重新分析" icon={<RobotOutlined />} onClick={() => beginAnalysis('reanalyze')} /></Tooltip>}
         </Space>
       </section>
@@ -166,8 +167,10 @@ export function SiteRulePanel({ site, rule, standalone = false, onOpenPlan }) {
 
       <Descriptions className="site-rule-facts" column={{ xs: 1, sm: 3 }} items={[
         { key: 'version', label: '发布版本', children: <span className="mono">{rule.version}</span> },
-        { key: 'candidate', label: '候选版本', children: <span className="mono">{rule.candidateVersion || '-'}</span> },
-        { key: 'health', label: '规则健康', children: <StatusTag value={rule.health} /> },
+        isBackendRule
+          ? { key: 'source', label: '来源任务', children: <span className="mono">{rule.sourceJobId || '-'}</span> }
+          : { key: 'candidate', label: '候选版本', children: <span className="mono">{rule.candidateVersion || '-'}</span> },
+        { key: 'health', label: isBackendRule ? '运行引擎' : '规则健康', children: isBackendRule ? '确定性解析' : <StatusTag value={rule.health} /> },
       ]} />
 
       {rule.status === '需修复' && (
@@ -189,7 +192,7 @@ export function SiteRulePanel({ site, rule, standalone = false, onOpenPlan }) {
               <Button onClick={() => { setDraft(rule.yaml); setEditing(false) }}>取消</Button>
               <Button type="primary" onClick={saveCandidate}>保存候选</Button>
             </Space>
-          ) : <span className="mono muted">{rule.version}</span>}
+          ) : <span className="mono muted">{isBackendRule ? rule.id : rule.version}</span>}
         >
           {editing
             ? <Input.TextArea className="code-editor site-rule-editor" value={draft} onChange={(event) => setDraft(event.target.value)} spellCheck={false} />
@@ -197,13 +200,20 @@ export function SiteRulePanel({ site, rule, standalone = false, onOpenPlan }) {
         </SectionCard>
 
         <div className="site-rule-side">
-          <SectionCard title={<PageTitle>验证与发布</PageTitle>}>
+          <SectionCard title={<PageTitle>{isBackendRule ? '发布记录' : '验证与发布'}</PageTitle>}>
             <Timeline items={[
               { color: 'green', icon: <CheckCircleOutlined />, content: <div><strong>生产版本 {rule.version}</strong><p className="muted">采集计划继续使用已冻结版本</p></div> },
-              { color: rule.candidateVersion ? 'blue' : 'gray', content: <div><strong>{rule.candidateVersion || '暂无候选版本'}</strong><p className="muted">编辑规则会生成候选快照</p></div> },
-              { color: rule.regression === 'passed' ? 'green' : rule.regression === 'failed' ? 'red' : 'gray', content: <div><strong>回归验证：{rule.regression === 'passed' ? '已通过' : rule.regression === 'failed' ? '未通过' : '待运行'}</strong><p className="muted">{rule.regressionPassed ?? (rule.regression === 'passed' ? 20 : 0)}/{rule.regressionTotal || 20} 个样本{rule.regressionMessage ? ` · ${rule.regressionMessage}` : ''}</p></div> },
+              ...(isBackendRule
+                ? [
+                    { color: 'green', content: <div><strong>确定性验证已通过</strong><p className="muted">列表与详情样本均由规则引擎验证</p></div> },
+                    { color: 'blue', content: <div><strong>生产采集已隔离</strong><p className="muted">采集 Worker 只读取该发布版本</p></div> },
+                  ]
+                : [
+                    { color: rule.candidateVersion ? 'blue' : 'gray', content: <div><strong>{rule.candidateVersion || '暂无候选版本'}</strong><p className="muted">编辑规则会生成候选快照</p></div> },
+                    { color: rule.regression === 'passed' ? 'green' : rule.regression === 'failed' ? 'red' : 'gray', content: <div><strong>回归验证：{rule.regression === 'passed' ? '已通过' : rule.regression === 'failed' ? '未通过' : '待运行'}</strong><p className="muted">{rule.regressionPassed ?? (rule.regression === 'passed' ? 20 : 0)}/{rule.regressionTotal || 20} 个样本{rule.regressionMessage ? ` · ${rule.regressionMessage}` : ''}</p></div> },
+                  ]),
             ]} />
-            <div className="stack-actions">
+            {!isBackendRule && <div className="stack-actions">
               <Button block icon={<ExperimentOutlined />} disabled={!rule.candidateVersion} onClick={() => {
                 const result = runRegression(rule.id)
                 result.passed
@@ -211,7 +221,7 @@ export function SiteRulePanel({ site, rule, standalone = false, onOpenPlan }) {
                   : message.error(`回归未通过：${result.reason}`)
               }}>运行回归</Button>
               <Button block type="primary" icon={<RocketOutlined />} disabled={!rule.candidateVersion || rule.regression !== 'passed'} onClick={publish}>发布候选版本</Button>
-            </div>
+            </div>}
           </SectionCard>
         </div>
       </div>

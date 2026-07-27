@@ -1,5 +1,15 @@
 node_modules
 dist
+.venv
+__pycache__
+.pytest_cache
+.ruff_cache
+*.py[cod]
+backend/data/*.db
+backend/data/*.db-*
+backend/data/attachments/
+backend/data/runs/*
+!backend/data/runs/.gitkeep
 .DS_Store
 *.local
 docs/

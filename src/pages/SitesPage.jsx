@@ -41,6 +41,7 @@ import { RowActions, SourceCell, StatusTag } from '../components/ConsoleUI'
 import { FolderTreeSelect } from '../components/FolderTreeSelect'
 import { usePrototype } from '../app/PrototypeContext'
 import { getSiteWorkspacePath } from '../app/routes'
+import { entryUrlKey, findRuleForSite, normalizeEntryUrl } from '../app/urlIdentity'
 import {
   ROOT_FOLDER_VALUE,
   buildSiteFolderTree,
@@ -118,10 +119,27 @@ function resolveKnownSiteNames(rows, sites) {
   return rows.map((row) => {
     if (row.name) return row
     const host = getUrlHost(row.url)
-    const existing = sites.find((site) => normalizeHost(site.host) === host)
+    const existing = sites.find((site) => entryUrlKey(site.entryUrl) === entryUrlKey(row.url))
+      || sites.find((site) => normalizeHost(site.host) === host)
     const knownName = String(existing?.name || '').trim()
     const canReuseName = knownName && normalizeHost(knownName) !== host && knownName !== '待识别网站'
     return { ...row, name: canReuseName ? knownName : '' }
+  })
+}
+
+function prepareImportRows(rows, sites) {
+  const existingUrls = new Set(sites.map((site) => entryUrlKey(site.entryUrl)).filter(Boolean))
+  const seenUrls = new Set()
+  return resolveKnownSiteNames(rows, sites).map((row) => {
+    const normalizedUrl = row.valid ? entryUrlKey(row.url) : ''
+    const duplicateInBatch = Boolean(normalizedUrl && seenUrls.has(normalizedUrl))
+    if (normalizedUrl) seenUrls.add(normalizedUrl)
+    return {
+      ...row,
+      normalizedUrl,
+      duplicateInBatch,
+      alreadyExists: Boolean(normalizedUrl && existingUrls.has(normalizedUrl)),
+    }
   })
 }
 
@@ -132,8 +150,9 @@ function isActiveAnalysis(entry) {
 function getSiteId(site) {
   if (site.id) return site.id
   if (Number.isInteger(site.key)) return `WS-${String(site.key + 1).padStart(3, '0')}`
-  const checksum = [...site.host].reduce((value, character) => (value * 31 + character.charCodeAt(0)) % 1000, 0)
-  return `WS-${String(checksum).padStart(3, '0')}`
+  const checksum = [...entryUrlKey(site.entryUrl || `https://${site.host}`)]
+    .reduce((value, character) => Math.imul(value ^ character.charCodeAt(0), 16777619) >>> 0, 2166136261)
+  return `WS-${checksum.toString(16).padStart(8, '0').toUpperCase()}`
 }
 
 export function SitesPage() {
@@ -182,21 +201,22 @@ export function SitesPage() {
     .flatMap((batch) => batch.urls.map((entry) => ({ ...entry, batchId: batch.id })))
     .filter(isActiveAnalysis), [intakeBatches])
 
-  const analysisByHost = useMemo(() => {
+  const analysisByUrl = useMemo(() => {
     const entries = new Map()
     activeAnalyses.forEach((entry) => {
-      const host = normalizeHost(entry.siteHost || getUrlHost(entry.url))
-      const current = entries.get(host)
-      if (!current || ['分析中', '排队中'].includes(entry.status)) entries.set(host, entry)
+      const urlKey = entryUrlKey(entry.url)
+      const current = entries.get(urlKey)
+      if (!current || ['分析中', '排队中'].includes(entry.status)) entries.set(urlKey, entry)
     })
     return entries
   }, [activeAnalyses])
 
   const registrySites = useMemo(() => sites.map((row) => {
     const host = normalizeHost(row.host)
-    const siteRule = rules.find((rule) => normalizeHost(rule.siteHost) === host)
-    const siteTasks = tasks.filter((task) => task.siteId === row.id || task.site === row.name || task.ruleId === siteRule?.id)
-    const analysisEntry = analysisByHost.get(host)
+    const normalizedUrl = entryUrlKey(row.entryUrl)
+    const siteRule = findRuleForSite(rules, row)
+    const siteTasks = tasks.filter((task) => task.siteId === row.id || task.ruleId === siteRule?.id)
+    const analysisEntry = analysisByUrl.get(normalizedUrl)
     let status = '可采集'
     if (['已停用', '已暂停'].includes(row.status)) status = '已停用'
     else if (row.status === '异常' || siteRule?.status === '需修复') status = '需处理'
@@ -209,6 +229,7 @@ export function SitesPage() {
     return {
       ...row,
       host,
+      normalizedUrl,
       id: getSiteId(row),
       status,
       accessHealth: row.status === '异常' ? '需处理' : '健康',
@@ -218,7 +239,7 @@ export function SitesPage() {
       collectionTask: siteTasks[0] || null,
       analysisEntry,
     }
-  }), [analysisByHost, sites, tasks, rules])
+  }), [analysisByUrl, sites, tasks, rules])
 
   const activeFolderBranchIds = useMemo(() => (
     siteFolders.some((folder) => folder.id === folderFilter)
@@ -232,7 +253,7 @@ export function SitesPage() {
     const scopeStatuses = SITE_SCOPE_STATUSES[scope]
     return matchesFolder
       && (!scopeStatuses || scopeStatuses.includes(row.status))
-      && `${row.id}${row.name}${row.host}`.toLowerCase().includes(search.trim().toLowerCase())
+      && `${row.id}${row.name}${row.host}${row.entryUrl}`.toLowerCase().includes(search.trim().toLowerCase())
   }), [activeFolderBranchIds, folderFilter, registrySites, scope, search])
   const selectedSites = useMemo(() => registrySites.filter((row) => selectedSiteIds.includes(row.id)), [registrySites, selectedSiteIds])
 
@@ -253,9 +274,10 @@ export function SitesPage() {
     { label: '需处理', value: countByStatus('需处理'), tone: 'red', icon: <WarningOutlined /> },
   ]
   useEffect(() => {
-    const host = params.get('site')
-    if (!host) return
-    const contextualSite = registrySites.find((site) => normalizeHost(site.host) === normalizeHost(host))
+    const identifier = params.get('site')
+    if (!identifier) return
+    const contextualSite = registrySites.find((site) => site.id === identifier || entryUrlKey(site.entryUrl) === entryUrlKey(identifier))
+      || registrySites.find((site) => normalizeHost(site.host) === normalizeHost(identifier))
     if (!contextualSite) return
     const legacyQuery = Object.fromEntries([...params.entries()].filter(([key]) => !['site', 'tab'].includes(key)))
     navigate(getSiteWorkspacePath(contextualSite, params.get('tab') === 'rule' ? 'rule' : 'overview', legacyQuery), { replace: true })
@@ -267,10 +289,10 @@ export function SitesPage() {
 
   const openAnalysis = (row) => {
     if (row.analysisEntry) {
-      navigate(`/ai?entry=${encodeURIComponent(row.analysisEntry.id)}&site=${encodeURIComponent(row.host)}`)
+      navigate(`/ai?entry=${encodeURIComponent(row.analysisEntry.id)}&site=${encodeURIComponent(row.entryUrl)}`)
       return
     }
-    const rule = rules.find((item) => normalizeHost(item.siteHost) === normalizeHost(row.host))
+    const rule = findRuleForSite(rules, row)
     const result = startSiteAnalysis({
       siteName: row.name,
       siteHost: row.host,
@@ -280,7 +302,7 @@ export function SitesPage() {
       folderId: row.folderId || defaultSiteFolderId,
     })
     message.success(result.existing ? '已打开该网站的活动分析任务' : 'AI 分析任务已创建')
-    navigate(`/ai?entry=${encodeURIComponent(result.entryId)}&site=${encodeURIComponent(row.host)}`)
+    navigate(`/ai?entry=${encodeURIComponent(result.entryId)}&site=${encodeURIComponent(row.entryUrl)}`)
   }
 
   const workflowAction = (row) => {
@@ -372,7 +394,7 @@ export function SitesPage() {
 
   const submitMoveToFolder = () => {
     if (!moveTargets.length) return
-    moveSitesToFolder(moveTargets.map((site) => site.host), moveFolderId || defaultSiteFolderId)
+    moveSitesToFolder(moveTargets.map((site) => site.id), moveFolderId || defaultSiteFolderId)
     const movedCount = moveTargets.length
     const movedIds = new Set(moveTargets.map((site) => site.id))
     setMoveTargets([])
@@ -401,7 +423,7 @@ export function SitesPage() {
   }
 
   const batchSetEnabled = (enabled) => {
-    const changed = setSitesEnabled(selectedSites.map((site) => site.host), enabled)
+    const changed = setSitesEnabled(selectedSites.map((site) => site.id), enabled)
     setSelectedSiteIds([])
     message.success(`已${enabled ? '启用' : '停用'} ${changed} 个网站`)
   }
@@ -427,7 +449,7 @@ export function SitesPage() {
 
   const updateImportText = (value) => {
     setImportText(value)
-    setImportRows(resolveKnownSiteNames(pastedTextToSites(value), sites))
+    setImportRows(prepareImportRows(pastedTextToSites(value), sites))
     setImportFileName('')
   }
 
@@ -442,7 +464,7 @@ export function SitesPage() {
         const readXlsxFile = module.default || module
         matrix = await readXlsxFile(file)
       }
-      const rows = resolveKnownSiteNames(workbookRowsToSites(matrix), sites)
+      const rows = prepareImportRows(workbookRowsToSites(matrix), sites)
       setImportRows(rows)
       setImportFileName(file.name)
       if (!rows.length) message.warning('文件中没有可识别的网站数据')
@@ -457,29 +479,33 @@ export function SitesPage() {
   }
 
   const submitImport = () => {
-    const validRows = importRows.filter((row) => row.valid)
+    const validRows = importRows.filter((row) => row.valid && !row.duplicateInBatch && !row.alreadyExists)
     if (!validRows.length) {
-      message.warning('没有可导入的网站，请先检查 URL')
+      message.warning('没有新的入口 URL 可导入')
       return
     }
-    const rowsByHost = new Map()
+    const rowsByUrl = new Map()
     validRows.forEach((row) => {
-      const host = getUrlHost(row.url)
-      const current = rowsByHost.get(host)
-      rowsByHost.set(host, {
+      const normalizedUrl = normalizeEntryUrl(row.url)
+      const current = rowsByUrl.get(normalizedUrl)
+      rowsByUrl.set(normalizedUrl, {
         ...(current || row),
         name: current?.name || row.name,
         url: current?.url || row.url,
-        entryUrls: [...new Set([...(current?.entryUrls || []), row.url])],
         folderId: importFolderId,
       })
     })
-    const result = importSites([...rowsByHost.values()], importFileName || '网站管理手动导入')
+    const result = importSites([...rowsByUrl.values()], importFileName || '网站管理手动导入')
     setImportOpen(false)
     resetImport()
     setScope('全部')
     setPage(1)
-    message.success(`网站导入完成：新增 ${result.created} 个，更新 ${result.updated} 个；未创建 AI 分析任务`)
+    const duplicateCount = importRows.filter((row) => row.valid && row.duplicateInBatch).length
+    const summary = [
+      `新增 ${result.created} 个`,
+      ...((existingImportCount || duplicateCount) ? [`已存在或重复 ${existingImportCount + duplicateCount} 个`] : []),
+    ].join('，')
+    message.success(`网站导入完成：${summary}；未创建 AI 分析任务`)
   }
 
   const importColumns = [
@@ -497,8 +523,12 @@ export function SitesPage() {
     {
       title: '校验',
       dataIndex: 'valid',
-      width: 84,
-      render: (value) => <span className={`site-import-validation ${value ? 'valid' : 'invalid'}`}>{value ? '可导入' : '需检查'}</span>,
+      width: 96,
+      render: (value, row) => {
+        const label = !value ? '需检查' : row.duplicateInBatch ? '本次重复' : row.alreadyExists ? '已存在' : '可导入'
+        const state = !value ? 'invalid' : row.duplicateInBatch || row.alreadyExists ? 'existing' : 'valid'
+        return <span className={`site-import-validation ${state}`}>{label}</span>
+      },
     },
   ]
 
@@ -537,9 +567,9 @@ export function SitesPage() {
       render: (_, row) => <SourceCell name={row.name} onClick={() => openSite(row)} ariaLabel={`查看 ${row.name} 概览`} />,
     },
     {
-      title: '域名',
-      dataIndex: 'host',
-      width: 190,
+      title: '入口 URL',
+      dataIndex: 'entryUrl',
+      width: 320,
       responsive: ['sm'],
       render: (value) => <span className="mono table-domain-cell" title={value}>{value}</span>,
     },
@@ -596,7 +626,9 @@ export function SitesPage() {
 
   const start = visibleRows.length ? (page - 1) * PAGE_SIZE + 1 : 0
   const end = Math.min(page * PAGE_SIZE, visibleRows.length)
-  const importableCount = new Set(importRows.filter((row) => row.valid).map((row) => getUrlHost(row.url))).size
+  const importableCount = importRows.filter((row) => row.valid && !row.duplicateInBatch && !row.alreadyExists).length
+  const existingImportCount = importRows.filter((row) => row.valid && !row.duplicateInBatch && row.alreadyExists).length
+  const duplicateImportCount = importRows.filter((row) => row.valid && row.duplicateInBatch).length
 
   return (
     <div className="page-content sites-page">
@@ -718,7 +750,7 @@ export function SitesPage() {
             dataSource={pagedRows}
             pagination={false}
             tableLayout="fixed"
-            scroll={{ x: screens.sm ? 1110 : 320 }}
+            scroll={{ x: screens.sm ? 1240 : 320 }}
             rowSelection={{
               selectedRowKeys: selectedSiteIds,
               onChange: (keys) => setSelectedSiteIds(keys),
@@ -736,7 +768,7 @@ export function SitesPage() {
                 <StatusTag value={row.status} />
               </div>
               <div className="site-card-stats">
-                <div><span>域名</span><b className="mono">{row.host}</b></div>
+                <div><span>入口 URL</span><b className="mono" title={row.entryUrl}>{row.entryUrl}</b></div>
                 <div><span>访问健康</span><b>{row.accessHealth}</b></div>
                 <div><span>规则版本</span><b className="mono">{row.ruleVersion}</b></div>
               </div>
@@ -777,7 +809,9 @@ export function SitesPage() {
         width={720}
         footer={[
           <Button key="cancel" onClick={closeImport}>取消</Button>,
-          <Button key="submit" type="primary" disabled={!importableCount || importLoading} onClick={submitImport}>导入 {importableCount} 个网站</Button>,
+          <Button key="submit" type="primary" disabled={!importableCount || importLoading} onClick={submitImport}>
+            {importableCount ? `导入 ${importableCount} 个网站` : '没有新网站'}
+          </Button>,
         ]}
       >
         <Alert
@@ -807,7 +841,7 @@ export function SitesPage() {
           options={[{ value: 'paste', label: '粘贴导入' }, { value: 'file', label: '文件导入' }]}
           onChange={(value) => {
             setImportMode(value)
-            setImportRows(value === 'paste' ? resolveKnownSiteNames(pastedTextToSites(importText), sites) : [])
+            setImportRows(value === 'paste' ? prepareImportRows(pastedTextToSites(importText), sites) : [])
             setImportFileName('')
           }}
         />
@@ -820,7 +854,7 @@ export function SitesPage() {
               autoSize={{ minRows: 6, maxRows: 10 }}
               spellCheck={false}
             />
-            <span>支持批量粘贴；同一域名将合并为一个网站资产。</span>
+            <span>每个规范化入口 URL 对应一个网站资产；同域名的不同路径会分别保留。</span>
           </div>
         ) : (
           <Upload.Dragger
@@ -837,7 +871,10 @@ export function SitesPage() {
         )}
         {importRows.length > 0 && (
           <section className="site-import-preview">
-            <header><strong>导入预览</strong><span>{importableCount} 个可导入</span></header>
+            <header>
+              <strong>导入预览</strong>
+              <span>{importableCount} 个可导入{existingImportCount ? ` · ${existingImportCount} 个已存在` : ''}{duplicateImportCount ? ` · ${duplicateImportCount} 个本次重复` : ''}</span>
+            </header>
             <Table rowKey="key" size="small" columns={importColumns} dataSource={importRows.slice(0, 8)} pagination={false} scroll={{ x: 620 }} />
           </section>
         )}

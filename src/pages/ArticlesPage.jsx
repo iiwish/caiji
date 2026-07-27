@@ -1,13 +1,81 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, App as AntApp, Button, Descriptions, Modal, Segmented, Space, Table } from 'antd'
+import { Alert, App as AntApp, Button, Descriptions, Modal, Segmented, Space, Spin, Table } from 'antd'
 import { CodeOutlined, CopyOutlined, ExportOutlined, LeftOutlined, MergeCellsOutlined, ToolOutlined } from '@ant-design/icons'
 import { useNavigate, useOutletContext, useParams, useSearchParams } from 'react-router-dom'
 import { EntityLink, PageTitle, RowActions, SectionCard, StatusTag } from '../components/ConsoleUI'
 import { usePrototype } from '../app/PrototypeContext'
+import { getBackendArticle, getBackendArticles } from '../app/localBackend'
 import { getSiteRulePath } from '../app/routes'
 
+function formatBackendTime(value) {
+  if (!value) return '—'
+  return new Date(value).toLocaleString('zh-CN', { hour12: false })
+}
+
+function toBackendArticle(article, sites) {
+  const sourceSite = sites.find((site) => site.backendSiteId === article.site_id)
+  let fallbackSite = article.site_name || ''
+  if (!fallbackSite) {
+    try {
+      fallbackSite = new URL(article.url).hostname
+    } catch {
+      fallbackSite = article.site_id
+    }
+  }
+  const quality = {
+    passed: '通过',
+    needs_review: '需处理',
+    legacy_unverified: '需处理',
+  }[article.quality_status] || '需处理'
+  return {
+    id: article.id,
+    title: article.title,
+    site: sourceSite?.name || fallbackSite,
+    siteId: sourceSite?.id || '',
+    backendSiteId: article.site_id,
+    url: article.url,
+    publishTime: article.published_at || '—',
+    collectedAt: formatBackendTime(article.created_at),
+    content: article.content_text,
+    rawContent: article.raw_html || '',
+    sourceHtml: article.source_html || '',
+    rawType: 'html',
+    executionId: article.execution_id,
+    ruleId: article.rule_id || '',
+    versionId: article.version_id || '',
+    observationId: article.observation_id || '',
+    observationOutcome: article.observation_outcome || '',
+    issuer: article.issuer || '—',
+    noticeType: article.notice_type || '—',
+    quality,
+    qualityChecks: article.quality_checks || {},
+    qualityIssues: article.quality_issues || [],
+    sourceResponse: {
+      requestedUrl: article.source_url || article.url,
+      finalUrl: article.final_url || article.url,
+      statusCode: article.source_status_code || 0,
+      contentType: article.source_content_type || '',
+      encoding: article.source_encoding || 'utf-8',
+      sha256: article.source_sha256 || '',
+      fetchedAt: formatBackendTime(article.fetched_at),
+    },
+    attachments: article.attachments || [],
+    backendMode: true,
+    dedup: {
+      normalizedUrl: article.url,
+      fingerprint: article.fingerprint,
+      status: '独立记录',
+      sourceCount: 1,
+    },
+  }
+}
+
 function getArticleSource(article, rule) {
-  const trimmed = String(article.rawContent || '').trim()
+  const trimmed = String(
+    article.backendMode
+      ? article.sourceHtml || article.rawContent || ''
+      : article.rawContent || '',
+  ).trim()
   const inferredType = article.rawType
     || (article.id === 'AR-12480' ? 'json' : '')
     || (/^[\[{]/.test(trimmed) || rule?.yaml?.includes('strategy: api') ? 'json' : 'html')
@@ -41,16 +109,15 @@ function getArticleSource(article, rule) {
   }
 }
 
-function ArticlesList() {
+function ArticlesList({ articles, backendError = '' }) {
   const { message } = AntApp.useApp()
   const navigate = useNavigate()
   const { search } = useOutletContext()
   const [params] = useSearchParams()
   const executionFilter = params.get('execution')
-  const { articles } = usePrototype()
   const [scope, setScope] = useState('全部')
   const visible = useMemo(() => articles.filter((article) => {
-    const needsHandling = ['内容噪声', '重复待确认'].includes(article.quality)
+    const needsHandling = ['需处理', '内容噪声', '重复待确认'].includes(article.quality)
     const matchesScope = scope === '全部'
       || (scope === '需处理' && needsHandling)
       || (scope === '多来源' && (article.dedup?.sourceCount || 1) > 1)
@@ -69,12 +136,13 @@ function ArticlesList() {
     },
     { title: '发布时间', dataIndex: 'publishTime', width: 118, render: (value) => <span className="mono">{value}</span> },
     { title: '质量', dataIndex: 'quality', width: 126, render: (value) => <StatusTag value={value} /> },
-    { title: '操作', width: 112, fixed: 'right', align: 'right', render: (_, row) => !['内容噪声', '重复待确认'].includes(row.quality)
+    { title: '操作', width: 112, fixed: 'right', align: 'right', render: (_, row) => !['需处理', '内容噪声', '重复待确认'].includes(row.quality)
       ? <span className="table-action-empty">—</span>
-      : <RowActions primary={{ label: '处理质量', onClick: () => navigate(`/articles/${row.id}?focus=quality`) }} /> },
+      : <RowActions primary={{ label: row.backendMode ? '查看质量' : '处理质量', onClick: () => navigate(`/articles/${row.id}?focus=quality`) }} /> },
   ]
   return (
     <div className="page-content">
+      {backendError && <Alert className="context-filter-alert" type="warning" showIcon title="真实原文暂时不可用" description={backendError} />}
       {executionFilter && <Alert className="context-filter-alert" type="info" showIcon closable onClose={() => navigate('/articles')} title={<>当前仅显示执行 <b className="mono">{executionFilter}</b> 的入库原文</>} />}
       <div className="list-toolbar"><Segmented value={scope} onChange={setScope} options={['全部', '需处理', '多来源']} /><div className="toolbar-spacer" /><Button icon={<ExportOutlined />} onClick={() => message.success(`已生成 ${visible.length} 条原文的导出任务`)}>导出</Button></div>
       <SectionCard bodyStyle={{ padding: 0 }}>
@@ -88,17 +156,20 @@ function ArticleDetail({ article }) {
   const { message } = AntApp.useApp()
   const navigate = useNavigate()
   const [params] = useSearchParams()
-  const { resolveArticleQuality, rules } = usePrototype()
+  const { resolveArticleQuality, rules, sites } = usePrototype()
   const [duplicateOpen, setDuplicateOpen] = useState(false)
   const qualitySectionRef = useRef(null)
-  const qualityFocused = params.get('focus') === 'quality' && ['内容噪声', '重复待确认'].includes(article.quality)
+  const qualityFocused = params.get('focus') === 'quality' && ['需处理', '内容噪声', '重复待确认'].includes(article.quality)
   const sourceRule = rules.find((rule) => rule.id === article.ruleId)
+  const sourceSite = article.backendMode
+    ? sites.find((site) => site.backendSiteId === article.backendSiteId)
+    : sites.find((site) => site.id === sourceRule?.siteId)
   const dedup = article.dedup || {}
   const duplicateCandidate = dedup.candidate
   const rawSource = getArticleSource(article, sourceRule)
   const sourceLines = rawSource.content.split('\n')
   const sourceBytes = new Blob([rawSource.content]).size
-  const siteRulePath = sourceRule ? getSiteRulePath(sourceRule.siteHost) : '/sites'
+  const siteRulePath = sourceSite ? getSiteRulePath(sourceSite) : '/sites'
   const resolveNoise = () => {
     resolveArticleQuality(article.id, '通过')
     message.success('质量状态已更新；规则修复仍需在回归发布后生效')
@@ -120,10 +191,10 @@ function ArticleDetail({ article }) {
           <div className="article-heading"><span className="mono muted">{article.id}</span><h1>{article.title}</h1><div><span>{article.site}</span><span>{article.publishTime}</span></div></div>
           <section className="article-source-viewer">
             <header className="article-source-toolbar">
-              <div><CodeOutlined /><strong>原始内容</strong><span className={`article-source-kind ${rawSource.type}`}>{rawSource.type.toUpperCase()}</span></div>
+              <div><CodeOutlined /><strong>{article.backendMode ? '完整响应快照' : '原始内容'}</strong><span className={`article-source-kind ${rawSource.type}`}>{rawSource.type.toUpperCase()}</span></div>
               <Button size="small" icon={<CopyOutlined />} onClick={copySource}>复制</Button>
             </header>
-            <div className="article-source-meta"><span>{sourceLines.length} 行</span><span>{sourceBytes.toLocaleString()} Bytes</span><span className="mono">UTF-8</span></div>
+            <div className="article-source-meta"><span>{sourceLines.length} 行</span><span>{sourceBytes.toLocaleString()} Bytes</span><span className="mono">{article.sourceResponse?.encoding?.toUpperCase() || 'UTF-8'}</span>{article.backendMode && <span className="mono">HTTP {article.sourceResponse.statusCode || '—'}</span>}</div>
             <div className="article-source-code" role="region" aria-label={`${rawSource.type.toUpperCase()} 原始内容`}>
               {sourceLines.map((line, index) => <div className="article-source-line" key={`${index}-${line}`}><span>{index + 1}</span><code>{line || ' '}</code></div>)}
             </div>
@@ -135,6 +206,8 @@ function ArticleDetail({ article }) {
               { key: 'site', label: '来源网站', children: article.site },
               { key: 'publish', label: '发布时间', children: article.publishTime },
               { key: 'collected', label: '采集时间', children: article.collectedAt },
+              { key: 'issuer', label: '发布单位', children: article.issuer || '—' },
+              { key: 'noticeType', label: '公告类型', children: article.noticeType || '—' },
               { key: 'format', label: '内容格式', children: <span className={`article-source-kind ${rawSource.type}`}>{rawSource.type.toUpperCase()}</span> },
               { key: 'quality', label: '质量状态', children: <StatusTag value={article.quality} /> },
               { key: 'canonical', label: '归并记录', children: <span className="mono">{dedup.canonicalId || '—'}</span> },
@@ -147,14 +220,29 @@ function ArticleDetail({ article }) {
             <div className="article-dedup-trace">
               <div><span>标准 URL</span><code>{dedup.normalizedUrl || article.url}</code></div>
               <div><span>内容指纹</span><code>{dedup.fingerprint || '—'}</code></div>
+              {article.backendMode && <div><span>响应指纹</span><code>{article.sourceResponse?.sha256 || '—'}</code></div>}
+              {article.backendMode && <div><span>原文版本</span><code>{article.versionId || '—'}</code></div>}
               <div><span>归并状态</span><strong>{dedup.status || '独立记录'}</strong></div>
             </div>
           </SectionCard>
-          {['内容噪声', '重复待确认'].includes(article.quality) && (
+          {article.backendMode && article.attachments?.length > 0 && (
+            <SectionCard title={<PageTitle>附件归档</PageTitle>}>
+              <div className="article-attachment-list">
+                {article.attachments.map((attachment) => (
+                  <div key={attachment.id}>
+                    <div><strong>{attachment.name}</strong><StatusTag value={attachment.status === 'archived' ? '已归档' : '需处理'} /></div>
+                    <span>{attachment.size_bytes ? `${(attachment.size_bytes / 1024).toFixed(1)} KB` : attachment.error_message || '等待归档'}</span>
+                    <a href={attachment.archived_url || attachment.url} target="_blank" rel="noreferrer">{attachment.archived_url ? '打开归档' : '打开源文件'} <ExportOutlined /></a>
+                  </div>
+                ))}
+              </div>
+            </SectionCard>
+          )}
+          {['需处理', '内容噪声', '重复待确认'].includes(article.quality) && (
             <div ref={qualitySectionRef} className={qualityFocused ? 'article-quality-focus' : ''}>
               <SectionCard title={<PageTitle>质量处理</PageTitle>}>
-                <Alert type="warning" showIcon title={article.quality} description={article.quality === '内容噪声' ? '建议定位到产生该原文的规则，调整正文清洗规则并回归发布。' : '请对比候选内容，确认是否属于同一标讯。'} />
-                <div className="stack-actions">{article.quality === '内容噪声' ? <><Button block icon={<ToolOutlined />} onClick={() => navigate(siteRulePath)}>修复网站规则</Button><Button block onClick={resolveNoise}>标记本条已确认</Button></> : <Button block type="primary" icon={<MergeCellsOutlined />} onClick={() => setDuplicateOpen(true)}>处理重复候选</Button>}</div>
+                <Alert type="warning" showIcon title={article.quality} description={article.backendMode ? (article.qualityIssues?.join('；') || '后端质量检查未通过') : article.quality === '内容噪声' ? '建议定位到产生该原文的规则，调整正文清洗规则并回归发布。' : '请对比候选内容，确认是否属于同一标讯。'} />
+                {!article.backendMode && <div className="stack-actions">{article.quality === '内容噪声' ? <><Button block icon={<ToolOutlined />} onClick={() => navigate(siteRulePath)}>修复网站规则</Button><Button block onClick={resolveNoise}>标记本条已确认</Button></> : <Button block type="primary" icon={<MergeCellsOutlined />} onClick={() => setDuplicateOpen(true)}>处理重复候选</Button>}</div>}
               </SectionCard>
             </div>
           )}
@@ -177,9 +265,81 @@ function ArticleDetail({ article }) {
 
 export function ArticlesPage() {
   const { articleId } = useParams()
-  const { articles } = usePrototype()
-  if (!articleId) return <ArticlesList />
-  const article = articles.find((item) => item.id === articleId)
-  if (!article) return <div className="page-content"><Alert type="error" showIcon title="原文记录不存在" /></div>
-  return <ArticleDetail article={article} />
+  const navigate = useNavigate()
+  const [pageParams] = useSearchParams()
+  const sourceExecutionId = articleId ? pageParams.get('execution') || '' : ''
+  const { articles: prototypeArticles, sites } = usePrototype()
+  const [backendArticles, setBackendArticles] = useState(null)
+  const [backendDetail, setBackendDetail] = useState(null)
+  const [backendLoading, setBackendLoading] = useState(true)
+  const [backendError, setBackendError] = useState('')
+
+  useEffect(() => {
+    let active = true
+    setBackendLoading(true)
+    getBackendArticles({ limit: 200 }).then((items) => {
+      if (!active) return
+      setBackendArticles(items)
+      setBackendError('')
+    }).catch((error) => {
+      if (!active) return
+      setBackendArticles([])
+      setBackendError(error.message || '无法读取真实原文')
+    }).finally(() => {
+      if (active) setBackendLoading(false)
+    })
+    return () => {
+      active = false
+    }
+  }, [])
+
+  const realArticles = useMemo(
+    () => (backendArticles || []).map((article) => toBackendArticle(article, sites)),
+    [backendArticles, sites],
+  )
+  const backendManagedSiteNames = useMemo(
+    () => new Set(sites.filter((site) => site.backendSiteId).map((site) => site.name)),
+    [sites],
+  )
+  const articles = useMemo(() => [
+    ...realArticles,
+    ...prototypeArticles.filter((article) => !backendManagedSiteNames.has(article.site)),
+  ], [backendManagedSiteNames, prototypeArticles, realArticles])
+  const article = articleId ? articles.find((item) => item.id === articleId) : null
+
+  useEffect(() => {
+    if (!article?.backendMode) {
+      setBackendDetail(null)
+      return undefined
+    }
+    let active = true
+    setBackendLoading(true)
+    getBackendArticle(article.id, { executionId: sourceExecutionId || article.executionId }).then((item) => {
+      if (active) setBackendDetail(toBackendArticle(item, sites))
+    }).catch((error) => {
+      if (active) setBackendError(error.message || '无法读取真实原文详情')
+    }).finally(() => {
+      if (active) setBackendLoading(false)
+    })
+    return () => {
+      active = false
+    }
+  }, [article?.backendMode, article?.executionId, article?.id, sites, sourceExecutionId])
+
+  useEffect(() => {
+    if (!articleId || backendLoading || article) return
+    const stalePrototype = prototypeArticles.find((item) => item.id === articleId)
+    if (stalePrototype && backendManagedSiteNames.has(stalePrototype.site)) {
+      navigate('/articles', { replace: true })
+    }
+  }, [article, articleId, backendLoading, backendManagedSiteNames, navigate, prototypeArticles])
+
+  if (!articleId) return <ArticlesList articles={articles} backendError={backendError} />
+  if (backendLoading && article?.backendMode) return <div className="page-content"><Spin /></div>
+  const resolvedArticle = backendDetail?.id === articleId ? backendDetail : article
+  if (!resolvedArticle) {
+    if (backendLoading) return <div className="page-content"><Spin /></div>
+    return <div className="page-content"><Alert type="error" showIcon title="原文记录不存在" /></div>
+  }
+  return <ArticleDetail article={resolvedArticle} />
 }

@@ -10,6 +10,7 @@ import {
 } from '../mock/domainData'
 import { siteRows as initialSites } from '../data'
 import { initialSiteFolders, migrateSiteFolders } from './siteFolderModel'
+import { entryUrlKey, findRuleForSite, normalizeEntryUrl } from './urlIdentity'
 
 const PrototypeContext = createContext(null)
 const STORAGE_PREFIX = 'collector.v2.'
@@ -163,14 +164,15 @@ function normalizeHost(host) {
 
 function migrateSites(value) {
   const source = Array.isArray(value) ? value : initialSites
-  const seededIdByHost = new Map(initialSites.map((site) => [normalizeHost(site.host), site.id]))
+  const seededIdByUrl = new Map(initialSites.map((site) => [entryUrlKey(site.entryUrl || `https://${site.host}`), site.id]))
   const reservedIds = new Set(initialSites.map((site) => site.id))
   const usedIds = new Set()
   let nextNumber = Math.max(...source.map((site) => Number(String(site?.id || '').replace('WS-', '')) || 0), initialSites.length) + 1
 
   return source.map((site, index) => {
     const key = Number.isInteger(site?.key) ? site.key : index
-    const seededId = seededIdByHost.get(normalizeHost(site?.host))
+    const normalizedUrl = normalizeEntryUrl(site?.entryUrl || `https://${site?.host || ''}`)
+    const seededId = seededIdByUrl.get(normalizedUrl)
     let id = seededId || site?.id
     if (!id || usedIds.has(id) || (!seededId && reservedIds.has(id))) {
       do {
@@ -179,7 +181,7 @@ function migrateSites(value) {
       } while (usedIds.has(id) || reservedIds.has(id))
     }
     usedIds.add(id)
-    return { ...site, key, id }
+    return { ...site, key, id, entryUrl: site?.entryUrl || normalizedUrl, normalizedUrl }
   })
 }
 
@@ -325,6 +327,7 @@ export function PrototypeProvider({ children }) {
     if (missingConfig.length) return { ok: false, reason: `采集配置缺少：${missingConfig.join('、')}` }
 
     const host = getUrlHost(currentEntry.url)
+    const currentSite = sites.find((site) => entryUrlKey(site.entryUrl) === entryUrlKey(currentEntry.url))
     const existingRule = rules.find((rule) => rule.id === currentEntry.ruleId)
     const nextRuleNumber = Math.max(...rules.map((rule) => Number(rule.id.replace('RP-', ''))), 0) + 1
     const ruleId = existingRule?.id || `RP-${String(nextRuleNumber).padStart(4, '0')}`
@@ -333,6 +336,7 @@ export function PrototypeProvider({ children }) {
       id: ruleId,
       name: `${siteName}采集规则`,
       site: siteName,
+      siteId: currentSite?.id,
       siteHost: host,
       entryUrl: currentEntry.url,
       version: 'v0.0.0',
@@ -345,6 +349,7 @@ export function PrototypeProvider({ children }) {
       ...baseRule,
       id: ruleId,
       site: siteName,
+      siteId: currentSite?.id || existingRule?.siteId,
       siteHost: host,
       entryUrl: currentEntry.url,
       yaml: analyzedYaml,
@@ -377,7 +382,7 @@ export function PrototypeProvider({ children }) {
 
     const version = stripReleaseCandidate(candidateVersion)
     const syncedTasks = tasks.filter((task) => task.ruleId === ruleId && task.versionPolicy === '跟随最新发布').length
-    const boundTasks = tasks.filter((task) => task.ruleId === ruleId || task.site === siteName)
+    const boundTasks = tasks.filter((task) => task.ruleId === ruleId || task.siteId === currentSite?.id)
     const publishedRule = {
       ...candidateRule,
       status: '已发布',
@@ -418,7 +423,7 @@ export function PrototypeProvider({ children }) {
     setTasks((items) => items.map((task) => task.ruleId === ruleId && task.versionPolicy === '跟随最新发布'
       ? { ...task, ruleVersion: version, status: '启用' }
       : task))
-    setSites((items) => items.map((site) => normalizeHost(site.host) === host && !['已停用', '已暂停'].includes(site.status)
+    setSites((items) => items.map((site) => entryUrlKey(site.entryUrl) === entryUrlKey(currentEntry.url) && !['已停用', '已暂停'].includes(site.status)
       ? {
         ...site,
         status: boundTasks.length ? '已完成' : '待配置',
@@ -434,7 +439,7 @@ export function PrototypeProvider({ children }) {
     const nextSites = [...sites]
     let nextNumber = Math.max(...nextSites.map((site) => Number(String(site.id || '').replace('WS-', '')) || 0), 0) + 1
     let created = 0
-    let updated = 0
+    let existing = 0
     let skipped = 0
     const siteIds = []
 
@@ -450,24 +455,12 @@ export function PrototypeProvider({ children }) {
 
       const host = normalizeHost(parsedUrl.host)
       const entryUrl = parsedUrl.toString()
-      const existingIndex = nextSites.findIndex((site) => normalizeHost(site.host) === host)
+      const normalizedUrl = normalizeEntryUrl(entryUrl)
+      const existingIndex = nextSites.findIndex((site) => entryUrlKey(site.entryUrl) === normalizedUrl)
       if (existingIndex >= 0) {
-        const existing = nextSites[existingIndex]
-        const importedName = String(row.name || '').trim()
-        const existingName = String(existing.name || '').trim()
-        nextSites[existingIndex] = {
-          ...existing,
-          name: importedName || (existingName && normalizeHost(existingName) !== host ? existingName : '待识别网站'),
-          host,
-          entryUrl,
-          entryUrls: [...new Set([...(existing.entryUrls || [existing.entryUrl].filter(Boolean)), ...(row.entryUrls || []), entryUrl])],
-          folderId: row.folderId || existing.folderId || defaultSiteFolderId,
-          freq: String(row.freq || '').trim() || existing.freq || '待配置',
-          importedAt: formatTimestamp(),
-          importSource: source,
-        }
-        siteIds.push(existing.id)
-        updated += 1
+        const existingSite = nextSites[existingIndex]
+        existing += 1
+        siteIds.push(existingSite.id)
         return
       }
 
@@ -479,7 +472,7 @@ export function PrototypeProvider({ children }) {
         name: String(row.name || '').trim() || '待识别网站',
         host,
         entryUrl,
-        entryUrls: [...new Set([...(row.entryUrls || []), entryUrl])],
+        normalizedUrl,
         folderId: row.folderId || defaultSiteFolderId,
         status: '待分析',
         records: '—',
@@ -492,11 +485,11 @@ export function PrototypeProvider({ children }) {
       created += 1
     })
 
-    if (created || updated) {
+    if (created) {
       setSites(nextSites)
-      recordAudit('导入网站资产', `${created} 新增/${updated} 更新/${skipped} 跳过`)
+      recordAudit('导入网站资产', `${created} 新增/${existing} 已存在/${skipped} 跳过`)
     }
-    return { created, updated, skipped, siteIds }
+    return { created, existing, skipped, siteIds }
   }
 
   const createSiteFolder = (name, parentId = null) => {
@@ -554,57 +547,60 @@ export function PrototypeProvider({ children }) {
     return { ok: true }
   }
 
-  const moveSitesToFolder = (siteHosts, folderId = defaultSiteFolderId) => {
-    const normalizedHosts = new Set(siteHosts.map(normalizeHost))
-    if (!normalizedHosts.size) return
+  const moveSitesToFolder = (siteIdentifiers, folderId = defaultSiteFolderId) => {
+    const identifiers = new Set(siteIdentifiers)
+    if (!identifiers.size) return
     const resolvedFolderId = siteFolders.some((item) => item.id === folderId) ? folderId : defaultSiteFolderId
     const folder = siteFolders.find((item) => item.id === resolvedFolderId)
-    setSites((items) => items.map((site) => normalizedHosts.has(normalizeHost(site.host))
+    setSites((items) => items.map((site) => identifiers.has(site.id) || identifiers.has(entryUrlKey(site.entryUrl))
       ? { ...site, folderId: resolvedFolderId }
       : site))
-    recordAudit('批量移动网站到文件夹', `${normalizedHosts.size} 个/${folder?.name || '默认文件夹'}`)
+    recordAudit('批量移动网站到文件夹', `${identifiers.size} 个/${folder?.name || '默认文件夹'}`)
   }
 
-  const setSitesEnabled = (siteHosts, enabled) => {
-    const normalizedHosts = new Set(siteHosts.map(normalizeHost))
-    if (!normalizedHosts.size) return 0
-    setSites((items) => items.map((site) => normalizedHosts.has(normalizeHost(site.host))
+  const setSitesEnabled = (siteIdentifiers, enabled) => {
+    const identifiers = new Set(siteIdentifiers)
+    if (!identifiers.size) return 0
+    setSites((items) => items.map((site) => identifiers.has(site.id) || identifiers.has(entryUrlKey(site.entryUrl))
       ? { ...site, status: enabled ? '已完成' : '已停用' }
       : site))
-    recordAudit(enabled ? '批量启用网站' : '批量停用网站', `${normalizedHosts.size} 个`)
-    return normalizedHosts.size
+    recordAudit(enabled ? '批量启用网站' : '批量停用网站', `${identifiers.size} 个`)
+    return identifiers.size
   }
 
-  const createSiteAnalysisBatch = ({ rows, folderId = defaultSiteFolderId, source = 'AI 分析' }) => {
-    const activeByHost = new Map()
+  const createSiteAnalysisBatch = ({ rows, folderId = defaultSiteFolderId, source = 'AI 分析', backendMode = false }) => {
+    const activeByUrl = new Map()
     intakeBatches.forEach((batch) => {
       batch.urls.forEach((entry) => {
-        const host = normalizeHost(entry.siteHost || getUrlHost(entry.url))
-        if (host && isAnalysisEntryActive(entry)) activeByHost.set(host, { batchId: batch.id, entryId: entry.id })
+        const urlKey = entryUrlKey(entry.url)
+        if (urlKey && isAnalysisEntryActive(entry)) activeByUrl.set(urlKey, { batchId: batch.id, entryId: entry.id })
       })
     })
-    const siteByHost = new Map(sites.map((site) => [normalizeHost(site.host), site]))
-    const ruleByHost = new Map(rules.map((rule) => [normalizeHost(rule.siteHost), rule]))
-    const queuedHosts = new Set()
-    const seenHosts = new Set()
+    const siteByUrl = new Map(sites.map((site) => [entryUrlKey(site.entryUrl), site]))
+    const ruleByUrl = new Map(rules.map((rule) => [entryUrlKey(rule.entryUrl), rule]))
+    const queuedUrls = new Set()
+    const seenUrls = new Set()
     const entries = []
+    const reusedEntries = []
     let reused = 0
     let skipped = 0
 
     rows.forEach((row) => {
       const host = normalizeHost(row.host || getUrlHost(row.url))
-      if (!host || seenHosts.has(host)) {
+      const urlKey = entryUrlKey(row.url)
+      if (!host || !urlKey || seenUrls.has(urlKey)) {
         skipped += 1
         return
       }
-      seenHosts.add(host)
-      if (activeByHost.has(host)) {
+      seenUrls.add(urlKey)
+      if (activeByUrl.has(urlKey)) {
+        reusedEntries.push({ ...activeByUrl.get(urlKey), host, url: row.url, folderId: row.folderId || folderId || '' })
         reused += 1
         return
       }
-      const site = siteByHost.get(host)
-      const rule = ruleByHost.get(host)
-      queuedHosts.add(host)
+      const site = siteByUrl.get(urlKey)
+      const rule = rules.find((item) => item.siteId === site?.id) || ruleByUrl.get(urlKey)
+      queuedUrls.add(urlKey)
       entries.push({
         id: nextAnalysisId('URL'),
         site: row.name || site?.name || '待识别网站',
@@ -620,10 +616,11 @@ export function PrototypeProvider({ children }) {
         analysisKind: rule ? 'reanalyze' : 'onboarding',
         folderId: row.folderId || folderId || '',
         queuedAt: Date.now(),
+        backendMode,
       })
     })
 
-    if (!entries.length) return { batchId: '', entryIds: [], firstHost: '', created: 0, reused, skipped }
+    if (!entries.length) return { batchId: '', entryIds: [], firstHost: reusedEntries[0]?.host || '', created: 0, reused, skipped, reusedEntries }
 
     const batchId = nextAnalysisId('IB')
     const batch = {
@@ -637,11 +634,34 @@ export function PrototypeProvider({ children }) {
       urls: entries,
     }
     setIntakeBatches((items) => [batch, ...items])
-    setSites((items) => items.map((site) => queuedHosts.has(normalizeHost(site.host)) && site.status !== '异常'
+    setSites((items) => items.map((site) => queuedUrls.has(entryUrlKey(site.entryUrl)) && site.status !== '异常'
       ? { ...site, status: '分析中', ...(folderId ? { folderId } : {}) }
       : site))
     recordAudit('创建受控 AI 分析批次', `${batchId}/${entries.length} 个网站/并发 ${ANALYSIS_CONCURRENCY_LIMIT}`)
-    return { batchId, entryIds: entries.map((entry) => entry.id), firstHost: entries[0].siteHost, created: entries.length, reused, skipped }
+    return {
+      batchId,
+      entryIds: entries.map((entry) => entry.id),
+      firstHost: entries[0].siteHost,
+      created: entries.length,
+      reused,
+      skipped,
+      reusedEntries,
+      createdEntries: entries.map((entry) => ({ batchId, entryId: entry.id, host: entry.siteHost, url: entry.url, folderId: entry.folderId })),
+    }
+  }
+
+  const syncSiteAnalysisResult = ({ host, name, entryUrl, folderId, backendSiteId, status = '待审核' }) => {
+    const urlKey = entryUrlKey(entryUrl)
+    setSites((items) => items.map((site) => entryUrlKey(site.entryUrl) === urlKey ? {
+      ...site,
+      name: name || site.name,
+      host: normalizeHost(host || site.host),
+      entryUrl: entryUrl || site.entryUrl,
+      normalizedUrl: urlKey,
+      folderId: folderId || site.folderId || defaultSiteFolderId,
+      backendSiteId: backendSiteId || site.backendSiteId,
+      status,
+    } : site))
   }
 
   const setAnalysisBatchPaused = (batchId, paused) => {
@@ -676,11 +696,12 @@ export function PrototypeProvider({ children }) {
 
   const startSiteAnalysis = ({ siteName, siteHost, url, ruleId, kind = 'reanalyze', failureId = '', sourceExecutionId = '', parentAnalysisId = '', source = '', folderId }) => {
     const normalizedHost = normalizeHost(siteHost || getUrlHost(url))
+    const normalizedUrl = entryUrlKey(url)
     const existing = intakeBatches.flatMap((batch) => batch.urls.map((entry) => ({ ...entry, batchId: batch.id })))
-      .find((entry) => normalizeHost(entry.siteHost || getUrlHost(entry.url)) === normalizedHost && isAnalysisEntryActive(entry))
+      .find((entry) => entryUrlKey(entry.url) === normalizedUrl && isAnalysisEntryActive(entry))
     if (existing) {
       if (folderId !== undefined) {
-        setSites((items) => items.map((site) => normalizeHost(site.host) === normalizedHost ? { ...site, folderId } : site))
+        setSites((items) => items.map((site) => entryUrlKey(site.entryUrl) === normalizedUrl ? { ...site, folderId } : site))
         setIntakeBatches((batches) => batches.map((batch) => batch.id === existing.batchId ? {
           ...batch,
           urls: batch.urls.map((entry) => entry.id === existing.id ? { ...entry, folderId } : entry),
@@ -754,7 +775,7 @@ export function PrototypeProvider({ children }) {
       }],
     }
     setIntakeBatches((items) => [batch, ...items])
-    setSites((items) => items.map((site) => normalizeHost(site.host) === normalizedHost && site.status !== '异常'
+    setSites((items) => items.map((site) => entryUrlKey(site.entryUrl) === normalizedUrl && site.status !== '异常'
       ? { ...site, status: '分析中', entryUrl: url, ...(folderId !== undefined ? { folderId } : {}) }
       : site))
     recordAudit(kind === 'diagnose' ? '发起网站 AI 诊断' : kind === 'onboarding' ? '创建网站 AI 分析任务' : '发起网站 AI 重新分析', `${normalizedHost}/${targetRuleId || 'new-rule'}`)
@@ -788,10 +809,10 @@ export function PrototypeProvider({ children }) {
     if (!rule || !rule.candidateVersion || rule.regression !== 'passed') return false
     const nextVersion = stripReleaseCandidate(rule.candidateVersion || rule.version)
     const syncedTasks = tasks.filter((task) => task.ruleId === ruleId && task.versionPolicy === '跟随最新发布').length
-    const boundTasks = tasks.filter((task) => task.ruleId === ruleId || task.site === rule.site)
+    const boundTasks = tasks.filter((task) => task.ruleId === ruleId || task.siteId === rule.siteId)
     setRules((items) => items.map((item) => item.id === ruleId ? { ...item, status: '已发布', version: nextVersion, candidateVersion: '', publishedYaml: item.yaml, health: '健康', repairSource: '', updatedAt: '刚刚' } : item))
     setTasks((items) => items.map((task) => task.ruleId === ruleId && task.versionPolicy === '跟随最新发布' ? { ...task, ruleVersion: nextVersion, status: '启用' } : task))
-    setSites((items) => items.map((site) => normalizeHost(site.host) === normalizeHost(rule.siteHost) && !['已停用', '已暂停'].includes(site.status)
+    setSites((items) => items.map((site) => (site.id === rule.siteId || entryUrlKey(site.entryUrl) === entryUrlKey(rule.entryUrl)) && !['已停用', '已暂停'].includes(site.status)
       ? {
         ...site,
         status: boundTasks.length ? '已完成' : '待配置',
@@ -842,7 +863,7 @@ export function PrototypeProvider({ children }) {
       ? { ...task, ruleVersion: nextVersion, status: '启用' }
       : task))
     if (rule.repairSource === 'diagnose') {
-      setSites((items) => items.map((site) => normalizeHost(site.host) === normalizeHost(rule.siteHost) && site.status === '异常'
+      setSites((items) => items.map((site) => (site.id === rule.siteId || entryUrlKey(site.entryUrl) === entryUrlKey(rule.entryUrl)) && site.status === '异常'
         ? { ...site, status: '已完成' }
         : site))
     }
@@ -1016,20 +1037,24 @@ export function PrototypeProvider({ children }) {
   }
 
   useEffect(() => {
-    const managedSites = sites.filter((site) => !['待分析', '分析中'].includes(site.status) || tasks.some((task) => task.site === site.name))
-    const missingSites = managedSites.filter((site) => !rules.some((rule) => normalizeHost(rule.siteHost) === normalizeHost(site.host)))
+    const managedSites = sites.filter((site) => !['待分析', '分析中'].includes(site.status)
+      || tasks.some((task) => task.siteId === site.id || (!task.siteId && task.site === site.name)))
+    const missingSites = managedSites.filter((site) => !rules.some((rule) => rule.siteId === site.id || entryUrlKey(rule.entryUrl) === entryUrlKey(site.entryUrl)))
     if (!missingSites.length) return
     const firstRuleNumber = Math.max(...rules.map((rule) => Number(rule.id.replace('RP-', ''))), 0) + 1
     const generatedRules = missingSites.map((site, index) => {
       const id = `RP-${String(firstRuleNumber + index).padStart(4, '0')}`
-      const relatedTask = tasks.find((task) => task.site === site.name)
-      const relatedExecution = executions.find((execution) => execution.site === site.name)
+      const relatedTask = tasks.find((task) => task.siteId === site.id || (!task.siteId && task.site === site.name))
+      const relatedExecution = executions.find((execution) => execution.siteId === site.id
+        || execution.taskId === relatedTask?.id
+        || (!execution.siteId && !relatedTask?.siteId && execution.site === site.name))
       const entryUrl = site.entryUrl || relatedExecution?.url || `https://${normalizeHost(site.host)}`
       const yaml = `name: ${site.name}采集规则\nentry_url: ${entryUrl}\nstrategy: html\nlist:\n  item: article.notice-item, ul.notice-list > li\n  link: a::attr(href)\ndetail:\n  title: h1::text\n  content: article, main .content::html\n  publish_time: time::text\nquality:\n  min_content_length: 160`
       return {
         id,
         name: `${site.name}采集规则`,
         site: site.name,
+        siteId: site.id,
         siteHost: normalizeHost(site.host),
         entryUrl,
         status: site.status === '异常' ? '需修复' : '已发布',
@@ -1047,10 +1072,14 @@ export function PrototypeProvider({ children }) {
 
   useEffect(() => {
     const nextTasks = tasks.map((task) => {
-      const site = sites.find((item) => item.name === task.site)
-      const siteRule = site && rules.find((rule) => normalizeHost(rule.siteHost) === normalizeHost(site.host))
-      if (!siteRule || task.ruleId === siteRule.id) return task
-      return { ...task, ruleId: siteRule.id, ruleVersion: siteRule.version }
+      const currentRule = rules.find((rule) => rule.id === task.ruleId)
+      const site = sites.find((item) => item.id === task.siteId
+        || item.id === currentRule?.siteId
+        || entryUrlKey(item.entryUrl) === entryUrlKey(currentRule?.entryUrl)
+        || (!task.siteId && !currentRule?.siteId && item.name === task.site))
+      const siteRule = findRuleForSite(rules, site)
+      if (!siteRule || (task.ruleId === siteRule.id && task.siteId === site.id)) return task
+      return { ...task, siteId: site.id, ruleId: siteRule.id, ruleVersion: siteRule.version }
     })
     if (nextTasks.some((task, index) => task !== tasks[index])) setTasks(nextTasks)
   }, [rules, sites, tasks])
@@ -1099,7 +1128,7 @@ export function PrototypeProvider({ children }) {
       count + batch.urls.filter((entry) => entry.status === '分析中').length
     ), 0)
     let remainingCapacity = Math.max(0, ANALYSIS_CONCURRENCY_LIMIT - runningCount)
-    if (!remainingCapacity || !intakeBatches.some((batch) => !batch.paused && batch.urls.some((entry) => entry.status === '排队中'))) return
+    if (!remainingCapacity || !intakeBatches.some((batch) => !batch.paused && batch.urls.some((entry) => entry.status === '排队中' && !entry.backendMode))) return
 
     const startedAt = Date.now()
     let changed = false
@@ -1109,7 +1138,7 @@ export function PrototypeProvider({ children }) {
       let batchCapacity = Math.max(0, Math.min(batch.concurrency || ANALYSIS_CONCURRENCY_LIMIT, ANALYSIS_CONCURRENCY_LIMIT) - batchRunning)
       if (!batchCapacity) return batch
       const urls = batch.urls.map((entry) => {
-        if (entry.status !== '排队中' || !remainingCapacity || !batchCapacity) return entry
+        if (entry.status !== '排队中' || entry.backendMode || !remainingCapacity || !batchCapacity) return entry
         changed = true
         remainingCapacity -= 1
         batchCapacity -= 1
@@ -1170,18 +1199,19 @@ export function PrototypeProvider({ children }) {
       let changed = false
       const nextSites = []
       items.forEach((site) => {
-        const normalizedHost = normalizeHost(site.host)
-        const duplicateIndex = nextSites.findIndex((item) => normalizeHost(item.host) === normalizedHost)
+        const normalizedUrl = entryUrlKey(site.entryUrl)
+        const duplicateIndex = nextSites.findIndex((item) => entryUrlKey(item.entryUrl) === normalizedUrl)
         if (duplicateIndex === -1) {
-          nextSites.push(normalizedHost === site.host ? site : { ...site, host: normalizedHost })
-          if (normalizedHost !== site.host) changed = true
+          const normalizedHost = normalizeHost(site.host)
+          nextSites.push({ ...site, host: normalizedHost, normalizedUrl })
+          if (normalizedHost !== site.host || normalizedUrl !== site.normalizedUrl) changed = true
           return
         }
         const existing = nextSites[duplicateIndex]
         const preferred = existing.records !== '—' ? existing : site
         nextSites[duplicateIndex] = {
           ...preferred,
-          host: normalizedHost,
+          normalizedUrl,
           entryUrl: existing.entryUrl || site.entryUrl,
         }
         changed = true
@@ -1190,7 +1220,8 @@ export function PrototypeProvider({ children }) {
         const host = getUrlHost(entry.url)
         if (!host) return
         const matchedTask = tasks.find((task) => task.ruleId === entry.ruleId || task.site === entry.site)
-        const existingIndex = nextSites.findIndex((site) => site.host === host)
+        const normalizedUrl = entryUrlKey(entry.url)
+        const existingIndex = nextSites.findIndex((site) => entryUrlKey(site.entryUrl) === normalizedUrl)
         const promotedStatus = matchedTask ? '已完成' : '待配置'
         if (existingIndex === -1) {
           nextSites.unshift({
@@ -1199,6 +1230,7 @@ export function PrototypeProvider({ children }) {
             name: entry.site || '待识别网站',
             host,
             entryUrl: entry.url,
+            normalizedUrl,
             folderId: entry.folderId || defaultSiteFolderId,
             status: promotedStatus,
             records: '—',
@@ -1243,6 +1275,7 @@ export function PrototypeProvider({ children }) {
     moveSitesToFolder,
     setSitesEnabled,
     createSiteAnalysisBatch,
+    syncSiteAnalysisResult,
     setAnalysisBatchPaused,
     cancelAnalysisEntry,
     startSiteAnalysis,

@@ -2969,6 +2969,11 @@ select {
   background: #e6f6ef;
 }
 
+.site-import-validation.existing {
+  color: #8a5b12;
+  background: #fff4dc;
+}
+
 .site-import-validation.invalid {
   color: #cf3350;
   background: #fdecef;
@@ -6503,7 +6508,8 @@ select {
 
 .article-source-code {
   max-height: 620px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   color: #344056;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   font-size: 12px;
@@ -6513,9 +6519,9 @@ select {
 
 .article-source-line {
   display: grid;
-  width: max-content;
+  width: 100%;
   min-width: 100%;
-  grid-template-columns: 52px minmax(max-content, 1fr);
+  grid-template-columns: 52px minmax(0, 1fr);
 }
 
 .article-source-line > span {
@@ -6530,7 +6536,9 @@ select {
 .article-source-line > code {
   padding: 0 18px;
   color: inherit;
-  white-space: pre;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .article-aside {
@@ -6569,6 +6577,42 @@ select {
 .article-dedup-trace > div {
   display: grid;
   gap: 4px;
+}
+
+.article-attachment-list {
+  display: grid;
+  gap: 12px;
+}
+
+.article-attachment-list > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #edf0f5;
+}
+
+.article-attachment-list > div:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.article-attachment-list > div > div {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  grid-column: 1 / -1;
+}
+
+.article-attachment-list strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.article-attachment-list span {
+  color: #7b879c;
+  font-size: 13px;
 }
 
 .article-dedup-trace span {
@@ -7360,7 +7404,7 @@ select {
   .article-source-toolbar { padding-inline: 14px; }
   .article-source-meta { padding-inline: 14px; }
   .article-source-code { max-height: 56vh; font-size: 11px; }
-  .article-source-line { grid-template-columns: 42px minmax(max-content, 1fr); }
+  .article-source-line { grid-template-columns: 42px minmax(0, 1fr); }
   .article-source-line > span { padding-right: 9px; }
   .article-source-line > code { padding-inline: 12px; }
   .intake-progress { width: 100%; }

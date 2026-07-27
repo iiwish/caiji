@@ -1,10 +1,16 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Alert, Button, DatePicker, Grid, Input, Modal, Select, Table } from 'antd'
+import { Alert, Button, DatePicker, Grid, Input, Modal, Select, Spin, Table } from 'antd'
 import { CalendarOutlined, ClearOutlined, DatabaseOutlined, GlobalOutlined, SearchOutlined, ToolOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { useNavigate, useOutletContext, useParams, useSearchParams } from 'react-router-dom'
 import { EntityLink, RowActions, SectionCard, StatusTag } from '../components/ConsoleUI'
 import { usePrototype } from '../app/PrototypeContext'
+import {
+  getBackendArticle,
+  getBackendArticles,
+  getBackendExecution,
+  getBackendExecutions,
+} from '../app/localBackend'
 import { recordDetails } from '../data'
 import { getSiteRulePath, getSiteWorkspacePath } from '../app/routes'
 
@@ -24,6 +30,7 @@ function getExecutionDate(value) {
 }
 
 function getBatchId(execution) {
+  if (execution.backendMode) return execution.id
   return `B-20726-${execution.id.replace('EX-', '')}`
 }
 
@@ -41,6 +48,7 @@ function getExecutionRulePath(row, includeSource = false) {
 }
 
 function getBatchRecords(execution) {
+  if (execution?.records) return execution.records
   if (!execution?.articles) return []
   return recordDetails.slice(0, Math.min(recordDetails.length, execution.articles)).map((record, index) => {
     const detailUrl = `/notice/detail/${8800 + index}.html`
@@ -64,7 +72,68 @@ function getBatchRecords(execution) {
   })
 }
 
+function formatBackendTime(value) {
+  if (!value) return '—'
+  return new Date(value).toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+}
+
+function formatBackendDuration(startedAt, finishedAt) {
+  if (!startedAt || !finishedAt) return '—'
+  const seconds = Math.max(0, Math.round((new Date(finishedAt) - new Date(startedAt)) / 1000))
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`
+}
+
+function toBackendExecution(execution, articles, sites, tasks) {
+  const sourceSite = sites.find((site) => site.backendSiteId === execution.site_id)
+  const task = tasks.find((item) => item.siteId === sourceSite?.id)
+  const status = {
+    queued: '排队中',
+    running: '运行中',
+    succeeded: '成功',
+    failed: '失败',
+    cancelled: '已取消',
+  }[execution.status] || execution.status
+  return {
+    id: execution.id,
+    taskId: task?.id || '',
+    siteId: sourceSite?.id || '',
+    backendSiteId: execution.site_id,
+    site: sourceSite?.name || execution.site_id,
+    url: sourceSite?.entryUrl || '',
+    ruleId: execution.rule_id,
+    ruleVersion: '已发布',
+    status,
+    articles: execution.linked_count ?? execution.collected_count,
+    discoveredCount: execution.discovered_count ?? execution.collected_count,
+    insertedCount: execution.inserted_count || 0,
+    updatedCount: execution.updated_count || 0,
+    unchangedCount: execution.unchanged_count || 0,
+    qualityPassedCount: execution.quality_passed_count || 0,
+    finishedAt: formatBackendTime(execution.finished_at),
+    duration: formatBackendDuration(execution.started_at, execution.finished_at),
+    collectionType: '全量采集',
+    backendMode: true,
+    records: articles.map((article) => ({
+      key: article.id,
+      title: article.title,
+      date: article.published_at || '—',
+      buyer: article.issuer || '—',
+      type: article.notice_type || '未识别',
+      detailUrl: article.url,
+      raw: article.raw_html || article.content_text,
+      quality: article.quality_status,
+    })),
+  }
+}
+
 function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewTask }) {
+  const navigate = useNavigate()
   const [detailSearch, setDetailSearch] = useState('')
   const [page, setPage] = useState(1)
   const records = useMemo(() => getBatchRecords(execution), [execution])
@@ -84,8 +153,9 @@ function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewTask 
   const columns = [
     { title: '公告标题', dataIndex: 'title', width: 360, render: (value) => <strong className="batch-record-title">{value}</strong> },
     { title: '发布时间', dataIndex: 'date', width: 120, render: (value) => <span className="mono batch-record-date">{value}</span> },
-    { title: '采购单位', dataIndex: 'buyer', width: 145 },
+    { title: '发布单位', dataIndex: 'buyer', width: 145 },
     { title: '类型', dataIndex: 'type', width: 100, render: (value) => <span className="batch-record-type">{value}</span> },
+    { title: '操作', width: 80, fixed: 'right', align: 'right', render: (_, record) => execution.backendMode ? <Button type="link" onClick={() => { onClose(); navigate(`/articles/${record.key}?execution=${execution.id}`) }}>原文</Button> : <span className="table-action-empty">—</span> },
   ]
 
   return (
@@ -101,7 +171,8 @@ function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewTask 
           <span className="batch-details-title-icon"><DatabaseOutlined /></span>
           <div>
             <div className="batch-details-title-line"><strong>采集明细</strong><span className="mono">{getBatchId(execution)}</span></div>
-            <p>{execution.site} · 共采集 <b className="mono">{execution.articles.toLocaleString()}</b> 条 · {execution.finishedAt}{execution.retryOf ? <> · 重跑自 <b className="mono">{getBatchId({ id: execution.retryOf })}</b></> : null}</p>
+            <p>{execution.site} · 关联原文 <b className="mono">{execution.articles.toLocaleString()}</b> 条 · {execution.finishedAt}{execution.retryOf ? <> · 重跑自 <b className="mono">{getBatchId({ id: execution.retryOf })}</b></> : null}</p>
+            {execution.backendMode && <p className="batch-details-result-summary">发现 {execution.discoveredCount} · 新增 {execution.insertedCount} · 更新 {execution.updatedCount} · 未变化 {execution.unchangedCount} · 质量通过 {execution.qualityPassedCount}</p>}
           </div>
         </div>
       )}
@@ -128,7 +199,7 @@ function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewTask 
         <Input
           allowClear
           prefix={<SearchOutlined />}
-          placeholder="搜索公告标题、采购单位、类型或详情链接"
+          placeholder="搜索公告标题、发布单位、公告类型或详情链接"
           value={detailSearch}
           onChange={(event) => {
             setDetailSearch(event.target.value)
@@ -143,7 +214,7 @@ function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewTask 
         columns={columns}
         dataSource={visibleRecords}
         tableLayout="fixed"
-        scroll={{ x: 773, y: 470 }}
+        scroll={{ x: 853, y: 470 }}
         locale={{ emptyText: detailSearch ? '没有匹配的采集明细' : '本次执行未采集到明细数据' }}
         expandable={{
           expandRowByClick: true,
@@ -170,12 +241,13 @@ function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewTask 
   )
 }
 
-function ExecutionsList({ initialExecution }) {
+function ExecutionsList({ initialExecution, executionsOverride = null }) {
   const navigate = useNavigate()
   const { search } = useOutletContext()
   const [params] = useSearchParams()
   const screens = Grid.useBreakpoint()
-  const { executions, tasks, sites } = usePrototype()
+  const { executions: prototypeExecutions, tasks, sites } = usePrototype()
+  const executions = executionsOverride || prototypeExecutions
   const statusParam = params.get('status')
   const siteParam = params.get('site')
   const [siteFilter, setSiteFilter] = useState(siteParam || undefined)
@@ -226,7 +298,13 @@ function ExecutionsList({ initialExecution }) {
     if (statusParam || siteParam) navigate('/executions', { replace: true })
   }
 
-  const openDetails = (row) => setSelectedExecution(row)
+  const openDetails = (row) => {
+    if (row.backendMode && !row.records?.length) {
+      navigate(`/executions/${row.id}`)
+      return
+    }
+    setSelectedExecution(row)
+  }
   const getExecutionSite = (row) => {
     const task = tasks.find((item) => item.id === row.taskId)
     return sites.find((site) => site.id === row.siteId || site.id === task?.siteId || site.name === row.site || site.name === task?.site)
@@ -237,14 +315,18 @@ function ExecutionsList({ initialExecution }) {
   }
 
   const renderActions = (row) => {
+    const site = getExecutionSite(row)
     const menuItems = [
-      ...(isRuleFailure(row) ? [{ key: 'repair-rule', icon: <ToolOutlined />, label: '修复网站规则', onClick: () => navigate(getExecutionRulePath(row, true)) }] : []),
+      ...(isRuleFailure(row) ? [{
+        key: 'repair-rule',
+        icon: <ToolOutlined />,
+        label: '修复网站规则',
+        onClick: () => navigate(site ? getSiteWorkspacePath(site, 'rule', { fromExecution: row.id }) : getExecutionRulePath(row, true)),
+      }] : []),
       { key: 'task', icon: <CalendarOutlined />, label: '查看采集计划', onClick: () => {
-        const site = getExecutionSite(row)
         navigate(site ? getSiteWorkspacePath(site, 'plan') : `/tasks?task=${row.taskId}`)
       } },
       { key: 'rule', icon: <GlobalOutlined />, label: '查看采集规则', onClick: () => {
-        const site = getExecutionSite(row)
         navigate(site ? getSiteWorkspacePath(site, 'rule') : getExecutionRulePath(row))
       } },
     ]
@@ -303,7 +385,10 @@ function ExecutionsList({ initialExecution }) {
         execution={selectedExecution}
         open={Boolean(selectedExecution)}
         onClose={closeDetails}
-        onRepairRule={(row) => navigate(getExecutionRulePath(row, true))}
+        onRepairRule={(row) => {
+          const site = getExecutionSite(row)
+          navigate(site ? getSiteWorkspacePath(site, 'rule', { fromExecution: row.id }) : getExecutionRulePath(row, true))
+        }}
         onViewTask={(row) => {
           const site = getExecutionSite(row)
           navigate(site ? getSiteWorkspacePath(site, 'plan') : `/tasks?task=${row.taskId}`)
@@ -315,9 +400,64 @@ function ExecutionsList({ initialExecution }) {
 
 export function ExecutionsPage() {
   const { executionId } = useParams()
-  const { executions } = usePrototype()
-  if (!executionId) return <ExecutionsList />
-  const execution = executionId ? executions.find((item) => item.id === executionId) : null
+  const { executions, sites, tasks } = usePrototype()
+  const [backendExecution, setBackendExecution] = useState(null)
+  const [backendExecutionList, setBackendExecutionList] = useState([])
+  const [backendLoading, setBackendLoading] = useState(false)
+  const [backendError, setBackendError] = useState('')
+  const localExecution = executionId ? executions.find((item) => item.id === executionId) : null
+
+  useEffect(() => {
+    let active = true
+    getBackendExecutions('', 200).then((items) => {
+      if (active) setBackendExecutionList(items)
+    }).catch(() => {
+      if (active) setBackendExecutionList([])
+    })
+    return () => {
+      active = false
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!executionId || localExecution) {
+      setBackendExecution(null)
+      setBackendError('')
+      return undefined
+    }
+    let active = true
+    setBackendLoading(true)
+    Promise.all([
+      getBackendExecution(executionId),
+      getBackendArticles({ executionId, limit: 200 }),
+    ]).then(async ([execution, summaries]) => {
+      const articles = await Promise.all(summaries.map((article) => getBackendArticle(article.id, { executionId })))
+      if (active) setBackendExecution(toBackendExecution(execution, articles, sites, tasks))
+    }).catch((error) => {
+      if (active) setBackendError(error.message || '无法读取真实采集批次')
+    }).finally(() => {
+      if (active) setBackendLoading(false)
+    })
+    return () => {
+      active = false
+    }
+  }, [executionId, localExecution, sites, tasks])
+
+  const backendRows = backendExecutionList.map((execution) => toBackendExecution(execution, [], sites, tasks))
+  const backendManagedSites = new Set(sites.filter((site) => site.backendSiteId).map((site) => site.id))
+  const backendManagedNames = new Set(sites.filter((site) => site.backendSiteId).map((site) => site.name))
+  const mergedExecutions = [
+    ...backendRows,
+    ...executions.filter((execution) => (
+      !backendManagedSites.has(execution.siteId)
+      && !backendManagedNames.has(execution.site)
+    )),
+  ]
+
+  if (!executionId) return <ExecutionsList executionsOverride={mergedExecutions} />
+  const execution = localExecution || backendExecution
+  if (backendLoading) return <div className="page-content"><Spin /></div>
+  if (backendError) return <div className="page-content"><Alert type="error" showIcon title="真实采集批次读取失败" description={backendError} /></div>
   if (!execution) return <div className="page-content"><Alert type="error" showIcon title="采集批次不存在" /></div>
-  return <ExecutionsList initialExecution={execution} />
+  return <ExecutionsList initialExecution={execution} executionsOverride={mergedExecutions} />
 }
