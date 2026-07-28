@@ -218,7 +218,7 @@ function validateGeneratedConfig(configText) {
 }
 
 export function AiAnalysisPage() {
-  const { message } = AntApp.useApp()
+  const { message, modal } = AntApp.useApp()
   const navigate = useNavigate()
   const location = useLocation()
   const { search } = useOutletContext()
@@ -377,6 +377,22 @@ export function AiAnalysisPage() {
   const selectedRule = selected ? rules.find((rule) => rule.id === selected.ruleId) : null
   const selectedSourceExecution = selected?.sourceExecutionId || fromExecution || ''
   const selectedFailure = selected?.failureId || fromFailure || ''
+  const isFailureRepair = selected?.analysisKind === 'diagnose' || Boolean(selectedFailure)
+  const selectedSourceExecutionIds = [...new Set([...(selected?.sourceExecutionIds || []), selectedSourceExecution].filter(Boolean))]
+  const selectedSourceExecutions = executions.filter((execution) => selectedSourceExecutionIds.includes(execution.id))
+  const validSourceExecutionIds = selectedSourceExecutions.map((execution) => execution.id)
+  const firstFailureTime = selectedSourceExecutions
+    .map((execution) => execution.startedAt || execution.finishedAt)
+    .filter((value) => value && value !== '-')
+    .sort()[0]
+  const recoveryPreview = isFailureRepair ? {
+    start: firstFailureTime
+      ? `${firstFailureTime} 之前最后提交成功的游标`
+      : '首次任务配置的起始边界；缺失时需人工确认',
+    end: '规则发布时固化的结束快照',
+    source: validSourceExecutionIds.length ? `${validSourceExecutionIds.length} 个原失败执行` : '未关联原失败执行，需返回失败队列补全',
+    boundary: '起点不含，终点包含；失败执行不推进游标',
+  } : null
   const matchingTasks = selected ? tasks.filter((task) => task.site === selected.site || task.ruleId === selected.ruleId) : []
   const followingTasks = matchingTasks.filter((task) => task.versionPolicy === '跟随最新发布')
   const automaticRegression = selected ? validateGeneratedConfig(configText) : { passed: false, passedCount: 0, total: 20, reason: '' }
@@ -420,15 +436,38 @@ export function AiAnalysisPage() {
     }, 900)
   }
 
-  const approveSelected = () => {
-    if (!automaticRegression.passed) return message.error(`自动回归未通过：${automaticRegression.reason}`)
+  const completeApproval = () => {
     const result = approveBatchUrl(selected.batchId, selected.id, configText)
     if (!result?.ok) return message.error(result?.reason || '审核失败，请重新加载后再试')
     setHandoffEntryId(selected.id)
     setEditingConfig(false)
-    message.success(result.syncedTasks
-      ? `审核通过，规则 ${result.version} 已发布，并更新 ${result.syncedTasks} 个采集计划`
-      : `审核通过，规则 ${result.version} 已发布`)
+    message.success(result.validationExecutionId
+      ? `规则 ${result.version} 已发布，系统正在按锁定范围重新执行`
+      : result.syncedTasks
+        ? `审核通过，规则 ${result.version} 已发布，并更新 ${result.syncedTasks} 个采集计划`
+        : `审核通过，规则 ${result.version} 已发布`)
+  }
+
+  const approveSelected = () => {
+    if (!automaticRegression.passed) return message.error(`自动回归未通过：${automaticRegression.reason}`)
+    if (!isFailureRepair) return completeApproval()
+    modal.confirm({
+      title: '确认使用新规则重新执行？',
+      width: 560,
+      okText: '发布并重新执行',
+      cancelText: '继续检查',
+      content: <div className="ai-recovery-confirm">
+        <p>新规则发布后，系统将创建新的执行记录；原失败执行继续保留“失败”事实。</p>
+        <dl>
+          <div><dt>预计起点</dt><dd>{recoveryPreview.start}</dd></div>
+          <div><dt>预计终点</dt><dd>{recoveryPreview.end}</dd></div>
+          <div><dt>来源范围</dt><dd>{recoveryPreview.source}</dd></div>
+          <div><dt>区间口径</dt><dd>{recoveryPreview.boundary}</dd></div>
+        </dl>
+        <small>系统会先验证新规则，再自动恢复锁定范围并完成幂等入库与对账。</small>
+      </div>,
+      onOk: completeApproval,
+    })
   }
 
   const saveConfigCorrection = () => {
@@ -486,6 +525,10 @@ export function AiAnalysisPage() {
   }
 
   const continueApprovedFlow = () => {
+    if (selected.validationExecutionId) {
+      navigate(`/executions/${selected.validationExecutionId}`)
+      return
+    }
     if (selectedSourceExecution) {
       const sourceExecution = executions.find((execution) => execution.id === selectedSourceExecution)
       const executionId = sourceExecution ? runTask(sourceExecution.taskId, sourceExecution.id) : null
@@ -858,8 +901,10 @@ export function AiAnalysisPage() {
   const isReleaseHandoff = releasePhase === 'published'
   const isHistorical = !isActiveAnalysis(selected)
   const releaseVersion = selected.releaseVersion || selectedRule?.version || '-'
-  const approvalNextLabel = selectedSourceExecution
-    ? '重跑失败任务'
+  const approvalNextLabel = selected.validationExecutionId
+    ? '查看重新执行进度'
+    : isFailureRepair
+      ? '查看故障进度'
     : selected.analysisKind === 'onboarding' || !matchingTasks.length
       ? '配置首次采集'
       : '查看采集计划'
@@ -869,6 +914,8 @@ export function AiAnalysisPage() {
       ? '请先保存或取消当前订正'
       : !automaticRegression.passed
         ? `自动回归未通过：${automaticRegression.reason}`
+        : isFailureRepair && !validSourceExecutionIds.length
+          ? '未关联原失败执行，请返回失败队列补全来源'
         : ''
   const queueBuckets = [
     { key: 'action', label: '需要处理', entries: visibleEntries.filter((entry) => !['分析中', '排队中'].includes(entry.status)) },
@@ -960,9 +1007,9 @@ export function AiAnalysisPage() {
               <div className="ai-handoff-icon success"><CheckCircleOutlined /></div>
               <div>
                 <span className="ai-handoff-eyebrow">审核与发布已完成</span>
-                <h1>采集规则已发布</h1>
-                <p>{selectedSourceExecution
-                  ? 'AI 自动回归和人工审核均已通过，生产规则已经更新，可以重跑原失败任务。'
+                <h1>{selected.validationExecutionId ? '新规则已发布，正在重新执行' : '采集规则已发布'}</h1>
+                <p>{isFailureRepair
+                  ? '原失败执行仍保留失败事实；系统正在依次完成规则验证、数据恢复和范围对账。'
                   : 'AI 自动回归和人工审核均已通过，规则已经同步到网站资产。'}</p>
               </div>
             </div>
@@ -970,7 +1017,9 @@ export function AiAnalysisPage() {
             <div className="ai-handoff-facts">
               <div><span>发布版本</span><strong className="mono">{releaseVersion}</strong><small>已同步网站资产</small></div>
               <div><span>AI 自动回归</span><strong>已通过</strong><small>{selected.regressionPassed || selectedRule?.regressionPassed || 20}/{selected.regressionTotal || selectedRule?.regressionTotal || 20} 个样本</small></div>
-              <div><span>影响范围</span><strong>{matchingTasks.length} 个采集计划</strong><small>{followingTasks.length} 个将跟随最新版本</small></div>
+              {selected.validationExecutionId
+                ? <div><span>重新执行范围</span><strong className="mono">{selected.validationExecutionId}</strong><small>{selected.recoveryPlan?.start || '最后成功游标'} → {selected.recoveryPlan?.end || '修复发布时刻'}</small></div>
+                : <div><span>影响范围</span><strong>{matchingTasks.length} 个采集计划</strong><small>{followingTasks.length} 个将跟随最新版本</small></div>}
             </div>
 
             <div className="ai-handoff-steps" aria-label="规则发布进度">
@@ -978,7 +1027,8 @@ export function AiAnalysisPage() {
               <i />
               <div className="done"><b><CheckOutlined /></b><span><strong>人工审核</strong><small>已通过</small></span></div>
               <i />
-              <div className="done"><b><CheckOutlined /></b><span><strong>发布上线</strong><small>已完成</small></span></div>
+              <div className={selected.validationExecutionId ? 'active' : 'done'}><b>{selected.validationExecutionId ? 3 : <CheckOutlined />}</b><span><strong>{selected.validationExecutionId ? '规则验证' : '发布上线'}</strong><small>{selected.validationExecutionId ? '执行中' : '已完成'}</small></span></div>
+              {selected.validationExecutionId && <><i /><div><b>4</b><span><strong>数据恢复</strong><small>验证通过后自动开始</small></span></div></>}
             </div>
 
             <div className="ai-handoff-actions">
@@ -1002,7 +1052,7 @@ export function AiAnalysisPage() {
             ) : (
               <>
                 <Button icon={<ReloadOutlined />} disabled={isRestarting} onClick={() => runAnalysis()}>{selected.status === '分析中' ? '重新开始分析' : '重新分析'}</Button>
-                <Button type="primary" icon={<CheckOutlined />} title={reviewBlockedReason} disabled={Boolean(reviewBlockedReason)} onClick={approveSelected}>{selected.status === '待确认归属' ? '确认规则' : reviewBlockedReason ? '暂不可审核' : '审核通过'}</Button>
+                <Button type="primary" icon={<CheckOutlined />} title={reviewBlockedReason} disabled={Boolean(reviewBlockedReason)} onClick={approveSelected}>{selected.status === '待确认归属' ? '确认规则' : reviewBlockedReason ? (isFailureRepair ? '暂不可重新执行' : '暂不可审核') : (isFailureRepair ? '发布并重新执行' : '审核通过')}</Button>
               </>
             )}
           </div>
@@ -1023,8 +1073,16 @@ export function AiAnalysisPage() {
             className="ai-flow-context"
             type="warning"
             showIcon
-            title={`正在修复 ${selected.site} 的失败采集`}
-            description={`${selectedSourceExecution ? `失败执行 ${selectedSourceExecution}` : selectedFailure || '失败队列'} · AI 自动回归通过后，点击审核通过将直接发布修复规则。`}
+            title={`使用新规则重新执行 ${selected.site} 的失败采集`}
+            description={<div className="ai-recovery-preview">
+              <p>{validSourceExecutionIds.length ? `关联 ${validSourceExecutionIds.join('、')}` : selectedFailure || '来源：失败队列'}。发布前请确认预计恢复范围；系统会创建新执行，不覆盖原失败记录。</p>
+              <dl>
+                <div><dt>预计起点</dt><dd>{recoveryPreview.start}</dd></div>
+                <div><dt>预计终点</dt><dd>{recoveryPreview.end}</dd></div>
+                <div><dt>来源范围</dt><dd>{recoveryPreview.source}</dd></div>
+              </dl>
+            </div>}
+            action={<Button onClick={() => navigate('/failures')}>返回失败队列</Button>}
           />
         )}
 

@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from 'react'
 import { Alert, App as AntApp, Button, Modal, Segmented, Select, Table, Tag, Tooltip } from 'antd'
 import {
   CloseOutlined,
-  EditOutlined,
   GlobalOutlined,
   ReloadOutlined,
   RobotOutlined,
@@ -12,7 +11,7 @@ import { useNavigate, useOutletContext } from 'react-router-dom'
 import { failureRows } from '../data'
 import { EntityLink, RowActions } from '../components/ConsoleUI'
 import { usePrototype } from '../app/PrototypeContext'
-import { getSiteRulePath, getSiteWorkspacePath } from '../app/routes'
+import { getSiteWorkspacePath } from '../app/routes'
 
 const HANDLING_FILTERS = ['全部', '自动处理', '人工处理']
 const ERROR_FILTERS = ['请求超时', '解析失败', '反爬拦截', 'HTTP 5xx']
@@ -79,7 +78,7 @@ function classifyHandling(row, diagnosis) {
       reason: row.code === 'FIELD_NULL'
         ? '关键业务字段提取异常，不能直接降级入库'
         : '页面结构变化需要审核新的生产规则',
-      nextAction: 'AI 诊断或编辑规则',
+      nextAction: 'AI 诊断并生成修复规则',
     }
   }
 
@@ -173,11 +172,24 @@ function absolutePageUrl(page, context) {
   }
 }
 
+function workflowTone(status, fallback) {
+  if (status === '已解决') return 'resolved'
+  if (status === '验证中') return 'validating'
+  if (status === '补采中') return 'recovering'
+  if (['诊断中', '待修复规则'].includes(status)) return 'analyzing'
+  return fallback
+}
+
+function workflowStatusLabel(status) {
+  if (status === '补采中') return '数据恢复中'
+  return status
+}
+
 export function FailuresPage() {
   const { message } = AntApp.useApp()
   const navigate = useNavigate()
   const { search } = useOutletContext()
-  const { sites, rules, tasks, executions, startSiteAnalysis } = usePrototype()
+  const { sites, rules, tasks, executions, intakeBatches, failureWorkflows, startSiteAnalysis } = usePrototype()
   const [handlingScope, setHandlingScope] = useState('全部')
   const [errorCategory, setErrorCategory] = useState()
   const [retryingIds, setRetryingIds] = useState([])
@@ -186,7 +198,19 @@ export function FailuresPage() {
   const [selectedIncident, setSelectedIncident] = useState(null)
   const [batchFeedback, setBatchFeedback] = useState(null)
 
-  const incidents = useMemo(() => buildIncidents(failureRows), [])
+  const baseIncidents = useMemo(() => buildIncidents(failureRows), [])
+  const incidents = useMemo(() => {
+    const analysisEntries = intakeBatches.flatMap((batch) => batch.urls)
+    return baseIncidents.map((incident) => {
+      const workflow = failureWorkflows[incident.id]
+      if (!workflow) return incident
+      const analysisEntry = analysisEntries.find((entry) => entry.id === workflow.analysisEntryId)
+      const status = workflow.status === '诊断中' && analysisEntry && !['排队中', '分析中'].includes(analysisEntry.status)
+        ? '待修复规则'
+        : workflow.status
+      return { ...incident, workflow: { ...workflow, status } }
+    })
+  }, [baseIncidents, failureWorkflows, intakeBatches])
   const visibleIncidents = useMemo(() => incidents.filter((incident) => {
     const matchesHandling = handlingScope === '全部'
       || (handlingScope === '自动处理' && incident.handling.mode === 'retry')
@@ -205,12 +229,12 @@ export function FailuresPage() {
   }, [visibleIncidents])
 
   const getIncidentContext = (incident) => {
-    if (!incident) return { site: null, rule: null, relatedTasks: [], sourceExecution: null }
+    if (!incident) return { site: null, rule: null, relatedTasks: [], sourceExecution: null, sourceExecutions: [] }
     const site = sites.find((item) => item.name === incident.site)
     const rule = rules.find((item) => item.site === incident.site || (site && item.siteHost === site.host))
     const relatedTasks = tasks.filter((task) => task.site === incident.site || task.ruleId === rule?.id)
-    const sourceExecution = executions.find((execution) => execution.site === incident.site && ['失败', '部分失败'].includes(execution.status))
-    return { site, rule, relatedTasks, sourceExecution }
+    const sourceExecutions = executions.filter((execution) => execution.site === incident.site && ['失败', '部分失败'].includes(execution.status))
+    return { site, rule, relatedTasks, sourceExecution: sourceExecutions[0], sourceExecutions }
   }
 
   const queueRetry = (rows) => {
@@ -228,19 +252,6 @@ export function FailuresPage() {
     const { site } = getIncidentContext(incident)
     if (site) navigate(getSiteWorkspacePath(site, 'plan'))
     else message.warning('当前故障尚未关联网站资产')
-  }
-
-  const openManualRule = (incident) => {
-    const { site, rule, sourceExecution } = getIncidentContext(incident)
-    if (!site || !rule) {
-      message.warning('当前网站还没有可编辑的采集规则，请使用 AI 重新生成')
-      return
-    }
-    navigate(getSiteRulePath(site, {
-      edit: '1',
-      fromFailure: incident.id,
-      fromExecution: sourceExecution?.id,
-    }))
   }
 
   const runDiagnosis = (requestedIncidents, { openFirst = false } = {}) => {
@@ -268,7 +279,9 @@ export function FailuresPage() {
         ruleId: context.rule?.id,
         kind: 'diagnose',
         failureId: incident.id,
+        failureIds: incidentIds,
         sourceExecutionId: context.sourceExecution?.id || '',
+        sourceExecutionIds: context.sourceExecutions.map((execution) => execution.id),
         folderId: context.site.folderId,
       })
       const params = new URLSearchParams({ entry: result.entryId, site: context.site.host, mode: 'diagnose', fromFailure: incident.id })
@@ -295,6 +308,23 @@ export function FailuresPage() {
       firstUrl: launched[0].url,
     })
     message.success(`已为 ${launched.length} 个网站提交故障诊断`)
+  }
+
+  const openWorkflow = (incident) => {
+    const workflow = incident.workflow
+    if (!workflow) return
+    if (['验证中', '补采中', '已解决'].includes(workflow.status)) {
+      const executionId = workflow.status === '验证中'
+        ? workflow.validationExecutionId
+        : workflow.recoveryExecutionId || workflow.validationExecutionId
+      if (executionId) navigate(`/executions/${executionId}`)
+      return
+    }
+    if (workflow.analysisEntryId) {
+      const params = new URLSearchParams({ entry: workflow.analysisEntryId, mode: 'diagnose', fromFailure: incident.id })
+      if (workflow.sourceExecutionId) params.set('fromExecution', workflow.sourceExecutionId)
+      navigate(`/ai?${params.toString()}`)
+    }
   }
 
   const columns = [
@@ -326,9 +356,9 @@ export function FailuresPage() {
       render: (_, incident) => <span className="table-single-value" title={incident.diagnosis.title}>{incident.diagnosis.title}</span>,
     },
     {
-      title: '影响',
+      title: '影响页面',
       dataIndex: 'impact',
-      width: 70,
+      width: 82,
       align: 'right',
       render: (value) => <span className="mono value-strong">{value}</span>,
     },
@@ -338,9 +368,9 @@ export function FailuresPage() {
       render: (_, incident) => {
         const retrying = retryingIds.includes(incident.id)
         const analyzing = analysisQueuedIds.includes(incident.id)
-        const status = retrying ? '重试中' : analyzing ? '诊断中' : incident.handling.status
-        const tone = retrying ? 'queued' : analyzing ? 'analyzing' : incident.handling.mode
-        return <span className={`failure-resolution-status ${tone}`}>{status}</span>
+        const status = incident.workflow?.status || (retrying ? '重试中' : analyzing ? '诊断中' : incident.handling.status)
+        const tone = workflowTone(status, retrying ? 'queued' : analyzing ? 'analyzing' : incident.handling.mode)
+        return <span className={`failure-resolution-status ${tone}`}>{workflowStatusLabel(status)}</span>
       },
     },
     {
@@ -359,18 +389,25 @@ export function FailuresPage() {
         const analyzing = analysisQueuedIds.includes(incident.id)
         const retryFirst = incident.handling.mode === 'retry'
         const { site } = getIncidentContext(incident)
+        const workflowStatus = incident.workflow?.status
+        const workflowPrimary = workflowStatus
+          ? {
+              label: workflowStatus === '已解决' ? '查看结果' : workflowStatus === '补采中' ? '查看恢复' : workflowStatus === '验证中' ? '查看验证' : '查看诊断',
+              onClick: () => workflowStatus === '已解决' ? setSelectedIncident(incident) : openWorkflow(incident),
+            }
+          : null
         return <RowActions
-          primary={retryFirst
+          primary={workflowPrimary || (retryFirst
             ? { label: retrying ? '重试中' : '重试', disabled: retrying, onClick: () => queueRetry([incident]) }
-            : { label: analyzing ? '诊断中' : '诊断', disabled: analyzing, onClick: () => runDiagnosis([incident], { openFirst: true }) }}
+            : { label: analyzing ? '诊断中' : '诊断', disabled: analyzing, onClick: () => runDiagnosis([incident], { openFirst: true }) })}
           menu={[
             ...(site ? [
               { key: 'site', icon: <GlobalOutlined />, label: '查看网站', onClick: () => navigate(getSiteWorkspacePath(site, 'overview')) },
               { type: 'divider' },
             ] : []),
-            retryFirst
-              ? { key: 'diagnose', icon: <RobotOutlined />, label: analyzing ? '诊断中' : 'AI 诊断', disabled: analyzing, onClick: () => runDiagnosis([incident], { openFirst: true }) }
-              : { key: 'retry', icon: <ReloadOutlined />, label: retrying ? '重试中' : '重试失败页面', disabled: retrying, onClick: () => queueRetry([incident]) },
+            ...(!workflowStatus && retryFirst
+              ? [{ key: 'diagnose', icon: <RobotOutlined />, label: analyzing ? '诊断中' : 'AI 诊断', disabled: analyzing, onClick: () => runDiagnosis([incident], { openFirst: true }) }]
+              : []),
           ]}
           moreLabel="更多"
         />
@@ -382,13 +419,15 @@ export function FailuresPage() {
     ? incidents.find((incident) => incident.id === selectedIncident.id) || selectedIncident
     : null
   const activeContext = getIncidentContext(activeIncident)
+  const activeRecoveryExecution = executions.find((execution) => execution.id === activeIncident?.workflow?.recoveryExecutionId)
   const selectedIncidents = incidents.filter((incident) => selectedIds.includes(incident.id))
-  const retryTargets = selectedIncidents.filter((incident) => !retryingIds.includes(incident.id))
-  const diagnosisTargets = selectedIncidents.filter((incident) => !analysisQueuedIds.includes(incident.id))
-  const retryFirstIncidents = incidents.filter((incident) => incident.handling.mode === 'retry')
-  const diagnoseFirstIncidents = incidents.filter((incident) => incident.handling.mode === 'diagnose')
+  const retryTargets = selectedIncidents.filter((incident) => incident.handling.mode === 'retry' && !incident.workflow && !retryingIds.includes(incident.id))
+  const diagnosisTargets = selectedIncidents.filter((incident) => !incident.workflow && !analysisQueuedIds.includes(incident.id))
+  const openIncidents = incidents.filter((incident) => incident.workflow?.status !== '已解决')
+  const retryFirstIncidents = openIncidents.filter((incident) => incident.handling.mode === 'retry')
+  const diagnoseFirstIncidents = openIncidents.filter((incident) => incident.handling.mode === 'diagnose')
   const failureStats = [
-    { label: '当前故障', value: incidents.length, meta: `影响 ${incidents.reduce((sum, incident) => sum + incident.impact, 0)} 个页面`, tone: 'red' },
+    { label: '当前故障', value: openIncidents.length, meta: `影响 ${openIncidents.reduce((sum, incident) => sum + incident.impact, 0)} 个页面`, tone: 'red' },
     { label: '自动处理', value: retryFirstIncidents.length, meta: `影响 ${retryFirstIncidents.reduce((sum, incident) => sum + incident.impact, 0)} 个页面`, tone: 'blue' },
     { label: '人工处理', value: diagnoseFirstIncidents.length, meta: `影响 ${diagnoseFirstIncidents.reduce((sum, incident) => sum + incident.impact, 0)} 个页面`, tone: 'amber' },
     { label: '今日重试成功', value: RETRY_SUCCEEDED_TODAY, meta: '恢复正常采集', tone: 'green' },
@@ -472,13 +511,13 @@ export function FailuresPage() {
             onChange: (keys) => setSelectedIds(keys),
             columnWidth: 48,
             getCheckboxProps: (incident) => ({
-              disabled: retryingIds.includes(incident.id) && analysisQueuedIds.includes(incident.id),
+              disabled: Boolean(incident.workflow) || (retryingIds.includes(incident.id) && analysisQueuedIds.includes(incident.id)),
             }),
           }}
           locale={{ emptyText: search ? '没有匹配的故障事件' : '当前分类没有故障事件' }}
         />
       </section>
-      <div className="failure-summary">当前显示 {visibleIncidents.length} 个故障事件 · 自动处理 {visibleIncidents.filter((incident) => incident.handling.mode === 'retry').length} 个 · 人工处理 {visibleIncidents.filter((incident) => incident.handling.mode === 'diagnose').length} 个 · 共影响 {visibleIncidents.reduce((sum, incident) => sum + incident.impact, 0)} 个页面</div>
+      <div className="failure-summary">当前显示 {visibleIncidents.length} 个故障事件 · 待处理 {visibleIncidents.filter((incident) => incident.workflow?.status !== '已解决').length} 个 · 已解决 {visibleIncidents.filter((incident) => incident.workflow?.status === '已解决').length} 个 · 共影响 {visibleIncidents.reduce((sum, incident) => sum + incident.impact, 0)} 个页面</div>
 
       <Modal
         className="failure-workbench-modal"
@@ -491,17 +530,16 @@ export function FailuresPage() {
         footer={activeIncident && (
           <div className="failure-modal-actions">
             <Button onClick={() => setSelectedIncident(null)}>关闭</Button>
-            {activeIncident.diagnosis.kind === 'rule' && <Button icon={<EditOutlined />} disabled={!activeContext.rule} onClick={() => openManualRule(activeIncident)}>编辑规则</Button>}
             {['access', 'retry'].includes(activeIncident.diagnosis.kind) && activeIncident.handling.mode === 'diagnose' && <Button icon={<SettingOutlined />} onClick={() => openCollectionConfig(activeIncident)}>{activeIncident.diagnosis.kind === 'access' ? '调整采集配置' : '检查采集配置'}</Button>}
-            <Button
+            {activeIncident.handling.mode === 'retry' && !activeIncident.workflow && <Button
               type={activeIncident.handling.mode === 'retry' ? 'primary' : 'default'}
               icon={<ReloadOutlined />}
               disabled={retryingIds.includes(activeIncident.id)}
               onClick={() => queueRetry([activeIncident])}
             >
               {retryingIds.includes(activeIncident.id) ? '重试中' : '重试失败页面'}
-            </Button>
-            <Button
+            </Button>}
+            {!activeIncident.workflow && <Button
               type={activeIncident.handling.mode === 'diagnose' ? 'primary' : 'default'}
               danger={activeIncident.diagnosis.kind === 'rule'}
               icon={<RobotOutlined />}
@@ -509,7 +547,10 @@ export function FailuresPage() {
               onClick={() => runDiagnosis([activeIncident], { openFirst: true })}
             >
               {analysisQueuedIds.includes(activeIncident.id) ? '诊断中' : 'AI 诊断'}
-            </Button>
+            </Button>}
+            {activeIncident.workflow && <Button type="primary" icon={<RobotOutlined />} onClick={() => openWorkflow(activeIncident)}>
+              {activeIncident.workflow.status === '已解决' ? '查看重新执行结果' : activeIncident.workflow.status === '补采中' ? '查看数据恢复' : activeIncident.workflow.status === '验证中' ? '查看规则验证' : '查看诊断任务'}
+            </Button>}
           </div>
         )}
       >
@@ -523,13 +564,21 @@ export function FailuresPage() {
             <section className={`failure-handling-panel ${activeIncident.handling.mode}`}>
               <div>
                 <span className={`failure-handling-tag ${activeIncident.handling.mode}`}>{activeIncident.handling.label}</span>
-                <span className={`failure-resolution-status ${retryingIds.includes(activeIncident.id) ? 'queued' : analysisQueuedIds.includes(activeIncident.id) ? 'analyzing' : activeIncident.handling.mode}`}>
-                  {retryingIds.includes(activeIncident.id) ? '重试中' : analysisQueuedIds.includes(activeIncident.id) ? '诊断中' : activeIncident.handling.status}
+                <span className={`failure-resolution-status ${workflowTone(activeIncident.workflow?.status, retryingIds.includes(activeIncident.id) ? 'queued' : analysisQueuedIds.includes(activeIncident.id) ? 'analyzing' : activeIncident.handling.mode)}`}>
+                  {workflowStatusLabel(activeIncident.workflow?.status || (retryingIds.includes(activeIncident.id) ? '重试中' : analysisQueuedIds.includes(activeIncident.id) ? '诊断中' : activeIncident.handling.status))}
                 </span>
               </div>
-              <h3>{activeIncident.handling.strategy}</h3>
+              <h3>{activeIncident.diagnosis.kind === 'rule' && activeIncident.workflow ? '使用新规则重新执行' : activeIncident.handling.strategy}</h3>
               <p>{activeIncident.handling.reason}</p>
-              <small>下一步：{retryingIds.includes(activeIncident.id)
+              <small>下一步：{activeIncident.workflow?.status === '验证中'
+                ? '系统正在验证新规则，通过后自动恢复已锁定的数据范围'
+                : activeIncident.workflow?.status === '补采中'
+                  ? '系统正在按锁定范围重新执行并完成游标对账'
+                  : activeIncident.workflow?.status === '已解决'
+                    ? '原失败执行保留失败事实，处置结果已关联到本次重新执行'
+                    : activeIncident.workflow?.status === '待修复规则'
+                      ? '完成规则订正和自动回归，确认范围后发布并重新执行'
+                      : retryingIds.includes(activeIncident.id)
                 ? '正在重试失败页面并验证结果'
                 : analysisQueuedIds.includes(activeIncident.id)
                   ? '正在分析错误原因并生成处理建议'
@@ -543,11 +592,31 @@ export function FailuresPage() {
             </section>
 
             <section className="failure-impact-grid">
-              <div><span>影响页面</span><strong className="mono">{activeIncident.impact}</strong></div>
-              <div><span>关联计划</span><strong className="mono">{activeContext.relatedTasks.length}</strong></div>
+              <div><span>故障影响页面</span><strong className="mono">{activeIncident.impact}</strong></div>
+              <div><span>失败执行</span><strong className="mono">{activeContext.sourceExecutions.length}</strong></div>
               <div><span>规则版本</span><strong className="mono">{activeContext.rule?.version || '-'}</strong></div>
-              <div><span>重试进度</span><strong className="mono">{activeIncident.retries}</strong></div>
+              <div><span>原执行重试</span><strong className="mono">{activeIncident.retries}</strong></div>
             </section>
+
+            {activeIncident.workflow?.recoveryPlan && (
+              <section className="failure-workbench-section failure-recovery-plan">
+                <div className="failure-section-heading"><h3>重新执行范围</h3><span>{activeIncident.workflow.recoveryPlan.mode}</span></div>
+                <div className="failure-recovery-grid">
+                  <div><span>范围起点</span><strong>{activeIncident.workflow.recoveryPlan.start}</strong></div>
+                  <div><span>范围终点</span><strong>{activeIncident.workflow.recoveryPlan.end}</strong></div>
+                  <div><span>区间口径</span><strong>{activeIncident.workflow.recoveryPlan.boundary || '起点不含，终点包含；失败执行不推进游标'}</strong></div>
+                  <div><span>范围依据</span><strong>{activeIncident.workflow.recoveryPlan.basis}</strong></div>
+                  <div><span>入库与对账</span><strong>{activeIncident.workflow.reconciliation || activeIncident.workflow.recoveryPlan.deduplication}</strong></div>
+                  <div><span>关闭条件</span><strong>{activeIncident.workflow.recoveryPlan.closure || '数据恢复成功且区间对账无未覆盖游标后关闭故障'}</strong></div>
+                  {activeRecoveryExecution?.status === '成功' && <div><span>恢复数量口径</span><strong>故障影响 {activeIncident.impact} 个页面；恢复发现 {activeRecoveryExecution.discovered} 条，入库 {activeRecoveryExecution.articles} 条，重复 {Math.max(0, activeRecoveryExecution.discovered - activeRecoveryExecution.articles)} 条</strong></div>}
+                </div>
+                <div className="failure-recovery-links">
+                  <span>原失败执行：{activeIncident.workflow.sourceExecutionIds?.join('、') || activeIncident.workflow.sourceExecutionId || '未关联'}</span>
+                  <span>规则验证执行：{activeIncident.workflow.validationExecutionId || '待创建'}</span>
+                  <span>数据恢复执行：{activeIncident.workflow.recoveryExecutionId || '待创建'}</span>
+                </div>
+              </section>
+            )}
 
             <section className="failure-workbench-section">
               <div className="failure-section-heading"><h3>失败页面</h3><span>按错误指纹聚合</span></div>

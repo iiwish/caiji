@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Alert, Button, DatePicker, Grid, Input, Modal, Select, Table } from 'antd'
-import { CalendarOutlined, ClearOutlined, DatabaseOutlined, GlobalOutlined, SearchOutlined, ToolOutlined } from '@ant-design/icons'
+import { CalendarOutlined, CheckCircleOutlined, ClearOutlined, DatabaseOutlined, GlobalOutlined, SearchOutlined, ToolOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { useNavigate, useOutletContext, useParams, useSearchParams } from 'react-router-dom'
 import { EntityLink, RowActions, SectionCard, StatusTag } from '../components/ConsoleUI'
@@ -11,10 +11,19 @@ import { getSiteRulePath, getSiteWorkspacePath } from '../app/routes'
 const { RangePicker } = DatePicker
 
 function getExecutionType(row, tasks) {
+  if (row.collectionType === '修复验证') return '规则验证'
+  if (row.collectionType === '缺口补采') return '数据恢复'
   if (row.collectionType) return row.collectionType
+  if (row.purpose === '修复验证') return '规则验证'
+  if (row.purpose === '缺口补采') return '数据恢复'
   const task = tasks.find((item) => item.id === row.taskId)
   const scope = task?.scope || '增量'
   return task?.executionMode === '单次' ? `单次${scope}` : `定时${scope}`
+}
+
+function getExecutionResult(row) {
+  if (row.purpose === '修复验证') return `${row.validationPassed || row.discovered || 0}/${row.validationTotal || row.discovered || 5} 样本`
+  return `${row.articles.toLocaleString()} 条入库`
 }
 
 function getExecutionDate(value) {
@@ -64,7 +73,7 @@ function getBatchRecords(execution) {
   })
 }
 
-function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewTask }) {
+function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewRule, onViewTask, onViewExecution }) {
   const [detailSearch, setDetailSearch] = useState('')
   const [page, setPage] = useState(1)
   const records = useMemo(() => getBatchRecords(execution), [execution])
@@ -75,6 +84,9 @@ function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewTask 
       `${record.title}${record.date}${record.buyer}${record.type}${record.detailUrl}`.toLowerCase().includes(keyword)
     ))
   }, [detailSearch, records])
+  const isValidation = execution?.purpose === '修复验证'
+  const validationPassed = execution?.validationPassed || execution?.discovered || 0
+  const validationTotal = execution?.validationTotal || execution?.discovered || 5
 
   useEffect(() => {
     setDetailSearch('')
@@ -101,11 +113,30 @@ function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewTask 
           <span className="batch-details-title-icon"><DatabaseOutlined /></span>
           <div>
             <div className="batch-details-title-line"><strong>采集明细</strong><span className="mono">{getBatchId(execution)}</span></div>
-            <p>{execution.site} · 共采集 <b className="mono">{execution.articles.toLocaleString()}</b> 条 · {execution.finishedAt}{execution.retryOf ? <> · 重跑自 <b className="mono">{getBatchId({ id: execution.retryOf })}</b></> : null}</p>
+            <p>{execution.site} · {execution.collectionType || execution.purpose || '采集执行'} · {isValidation ? <>验证样本 <b className="mono">{validationPassed}/{validationTotal}</b></> : <>入库 <b className="mono">{execution.articles.toLocaleString()}</b> 条</>} · {execution.finishedAt}{execution.retryOf ? <> · 关联原执行 <b className="mono">{getBatchId({ id: execution.retryOf })}</b></> : null}</p>
           </div>
         </div>
       )}
     >
+      {execution?.resolution && (
+        <Alert
+          className="execution-resolution-alert"
+          type="success"
+          showIcon
+          title="原执行结果保留为失败，关联故障已经完成处置"
+          description={`修复规则 ${execution.resolution.ruleVersion} 已通过验证，并完成 ${execution.resolution.recoveryPlan?.start || '最后成功游标'} 到 ${execution.resolution.recoveryPlan?.end || '修复发布时刻'} 的数据恢复。`}
+          action={<Button type="primary" onClick={() => onViewExecution(execution.resolution.recoveryExecutionId)}>查看重新执行结果</Button>}
+        />
+      )}
+      {execution?.recoveryPlan && (
+        <Alert
+          className="execution-recovery-alert"
+          type={execution.purpose === '缺口补采' ? 'warning' : 'info'}
+          showIcon
+          title={execution.purpose === '缺口补采' ? '本执行用于恢复历史缺口，不覆盖原失败执行' : '新规则验证通过后自动开始数据恢复'}
+          description={`${execution.recoveryPlan.start} → ${execution.recoveryPlan.end}；${execution.recoveryPlan.boundary || '起点不含，终点包含；失败执行不推进游标'}；${execution.recoveryPlan.basis}；${execution.reconciliation || execution.recoveryPlan.deduplication}。`}
+        />
+      )}
       {execution && ['失败', '部分失败'].includes(execution.status) && (
         <Alert
           className="execution-diagnostic-alert"
@@ -113,8 +144,10 @@ function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewTask 
           showIcon
           title={`${execution.stage || '采集执行'}：${execution.issue || '执行过程中存在失败项'}`}
           description={<div className="execution-diagnostic-meta"><span>规则 <b className="mono">{execution.ruleId} · {execution.ruleVersion}</b></span><span>执行耗时 <b className="mono">{execution.duration}</b></span></div>}
-          action={isRuleFailure(execution)
-            ? <Button type="primary" danger icon={<ToolOutlined />} onClick={() => onRepairRule(execution)}>修复网站规则</Button>
+          action={execution.resolution
+            ? <Button onClick={() => onViewRule(execution)}>查看修复规则</Button>
+            : isRuleFailure(execution)
+              ? <Button type="primary" danger icon={<ToolOutlined />} onClick={() => onRepairRule(execution)}>修复网站规则</Button>
             : <Button onClick={() => onViewTask(execution)}>查看采集计划</Button>}
         />
       )}
@@ -124,7 +157,12 @@ function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewTask 
           <pre className="mono">{execution.logs.join('\n')}</pre>
         </details>
       )}
-      <div className="batch-details-search">
+      {isValidation ? (
+        <section className="execution-validation-result" aria-label="规则验证结果">
+          <CheckCircleOutlined />
+          <div><span>验证结果</span><strong>{validationPassed}/{validationTotal} 个代表样本通过</strong><small>原失败阶段已恢复，允许按锁定范围继续执行数据恢复。</small></div>
+        </section>
+      ) : <><div className="batch-details-search">
         <Input
           allowClear
           prefix={<SearchOutlined />}
@@ -165,7 +203,7 @@ function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewTask 
             ? `第 ${range[0]}–${range[1]} 条 · 找到 ${total} 条`
             : `第 ${range[0]}–${range[1]} 条 · 批次共 ${execution?.articles.toLocaleString() || 0} 条`,
         }}
-      />
+      /></>}
     </Modal>
   )
 }
@@ -235,10 +273,12 @@ function ExecutionsList({ initialExecution }) {
     setSelectedExecution(null)
     if (initialExecution) navigate('/executions', { replace: true })
   }
+  const selectedExecutionWithType = selectedExecution ? { ...selectedExecution, collectionType: getExecutionType(selectedExecution, tasks) } : null
 
   const renderActions = (row) => {
     const menuItems = [
-      ...(isRuleFailure(row) ? [{ key: 'repair-rule', icon: <ToolOutlined />, label: '修复网站规则', onClick: () => navigate(getExecutionRulePath(row, true)) }] : []),
+      ...(row.resolution ? [{ key: 'resolution', icon: <CheckCircleOutlined />, label: '查看重新执行结果', onClick: () => navigate(`/executions/${row.resolution.recoveryExecutionId}`) }] : []),
+      ...(isRuleFailure(row) && !row.resolution ? [{ key: 'repair-rule', icon: <ToolOutlined />, label: '修复网站规则', onClick: () => navigate(getExecutionRulePath(row, true)) }] : []),
       { key: 'task', icon: <CalendarOutlined />, label: '查看采集计划', onClick: () => {
         const site = getExecutionSite(row)
         navigate(site ? getSiteWorkspacePath(site, 'plan') : `/tasks?task=${row.taskId}`)
@@ -255,10 +295,10 @@ function ExecutionsList({ initialExecution }) {
     { title: '批次 ID', dataIndex: 'id', width: 148, render: (_, row) => <EntityLink title={getBatchId(row)} titleClassName="mono" onClick={() => openDetails(row)} ariaLabel={`查看批次 ${getBatchId(row)}`} /> },
     { title: '网站', dataIndex: 'site', width: 215, render: (value) => <span className="table-single-value" title={value}>{value}</span> },
     { title: '采集类型', dataIndex: 'collectionType', width: 112, render: (value) => <span className={`collection-mode-tag ${value.includes('全量') ? 'full' : 'incremental'}`}>{value}</span> },
-    { title: '采集量', dataIndex: 'articles', width: 90, align: 'right', render: (value) => <span className="mono value-strong">{value.toLocaleString()}</span> },
+    { title: '执行结果', width: 110, align: 'right', render: (_, row) => <span className="mono value-strong">{getExecutionResult(row)}</span> },
     { title: '耗时', dataIndex: 'duration', width: 82, align: 'right', render: (value) => <span className="mono muted execution-duration">{value}</span> },
     { title: '完成时间', dataIndex: 'finishedAt', width: 116, render: (value) => <span className="mono muted execution-finished-at">{value}</span> },
-    { title: '状态', dataIndex: 'status', width: 102, render: (value) => <StatusTag value={value} /> },
+    { title: '状态', dataIndex: 'status', width: 138, render: (value, row) => <div className="execution-status-stack"><StatusTag value={value} />{row.resolution && <StatusTag value="已处置" />}</div> },
     { title: '操作', width: 72, fixed: 'right', align: 'right', render: (_, row) => renderActions(row) },
   ]
 
@@ -280,11 +320,11 @@ function ExecutionsList({ initialExecution }) {
           <div className="execution-mobile-list">
             {visible.map((row) => (
               <article className="execution-mobile-item" key={row.id}>
-                <div className="execution-mobile-head"><EntityLink className="execution-mobile-id" title={getBatchId(row)} titleClassName="mono" onClick={() => openDetails(row)} ariaLabel={`查看批次 ${getBatchId(row)}`} /><StatusTag value={row.status} /></div>
+                <div className="execution-mobile-head"><EntityLink className="execution-mobile-id" title={getBatchId(row)} titleClassName="mono" onClick={() => openDetails(row)} ariaLabel={`查看批次 ${getBatchId(row)}`} /><div className="execution-status-stack"><StatusTag value={row.status} />{row.resolution && <StatusTag value="已处置" />}</div></div>
                 <div className="execution-mobile-source"><strong>{row.site}</strong></div>
                 <dl>
                   <div><dt>采集类型</dt><dd>{getExecutionType(row, tasks)}</dd></div>
-                  <div><dt>入库原文</dt><dd className="mono value-strong">{row.articles.toLocaleString()}</dd></div>
+                  <div><dt>执行结果</dt><dd className="mono value-strong">{getExecutionResult(row)}</dd></div>
                   <div><dt>完成时间</dt><dd className="mono">{row.finishedAt}</dd></div>
                   <div><dt>耗时</dt><dd className="mono">{row.duration}</dd></div>
                 </dl>
@@ -300,14 +340,19 @@ function ExecutionsList({ initialExecution }) {
         </SectionCard>
       )}
       <BatchDetailsModal
-        execution={selectedExecution}
+        execution={selectedExecutionWithType}
         open={Boolean(selectedExecution)}
         onClose={closeDetails}
         onRepairRule={(row) => navigate(getExecutionRulePath(row, true))}
+        onViewRule={(row) => {
+          const site = getExecutionSite(row)
+          navigate(site ? getSiteWorkspacePath(site, 'rule') : getExecutionRulePath(row))
+        }}
         onViewTask={(row) => {
           const site = getExecutionSite(row)
           navigate(site ? getSiteWorkspacePath(site, 'plan') : `/tasks?task=${row.taskId}`)
         }}
+        onViewExecution={(executionId) => navigate(`/executions/${executionId}`)}
       />
     </div>
   )

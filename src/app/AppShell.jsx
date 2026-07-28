@@ -18,6 +18,7 @@ import {
 } from '@ant-design/icons'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { SearchBar } from '../components/ConsoleUI'
+import { failureRows } from '../data'
 import { usePrototype } from './PrototypeContext'
 
 const { Header, Content, Sider } = Layout
@@ -74,7 +75,7 @@ function getFocusedWorkspaceMeta(location) {
 export function AppShell() {
   const navigate = useNavigate()
   const location = useLocation()
-  const { intakeBatches, notificationCount, setNotificationCount } = usePrototype()
+  const { intakeBatches, failureWorkflows, notificationCount, setNotificationCount } = usePrototype()
   const [collapsed, setCollapsed] = useState(() => window.innerWidth <= 1180)
   const [search, setSearch] = useState('')
   const searchRef = useRef(null)
@@ -82,7 +83,11 @@ export function AppShell() {
   const navigationWorkspace = workspace === 'tasks' ? 'sites' : workspace
   const focusedMeta = getFocusedWorkspaceMeta(location)
   const meta = focusedMeta || pageMeta[workspace] || pageMeta.dashboard
-  const failureCount = 37
+  const failureCount = useMemo(() => (
+    [...new Set(failureRows.map((row) => `${row.site}-${row.code}`))]
+      .filter((incidentId) => failureWorkflows[incidentId]?.status !== '已解决')
+      .length
+  ), [failureWorkflows])
   const activeAnalysisEntries = intakeBatches
     .flatMap((batch) => batch.urls)
     .filter((entry) => !['审核完成', '已通过', '已完成', '已取消'].includes(entry.status))
@@ -126,11 +131,11 @@ export function AppShell() {
     { type: 'group', label: '治理', children: [
       { key: 'capabilities', icon: <CodeOutlined />, label: 'Skill 能力', title: 'Skill 能力', 'aria-label': 'Skill 能力' },
     ] },
-  ], [intakeNeedsHandling])
+  ], [failureCount, intakeNeedsHandling])
 
   const notificationMenu = {
     items: [
-      { key: 'failure', label: `${failureCount} 个失败页面需要处理`, onClick: () => navigate('/failures') },
+      { key: 'failure', label: `${failureCount} 个当前故障需要处理`, onClick: () => navigate('/failures') },
       { key: 'review', label: `AI 分析队列中有 ${intakeNeedsHandling} 个任务需要处理`, onClick: () => navigate('/ai') },
       { key: 'read', label: '全部标记为已读', onClick: () => setNotificationCount(0) },
     ],

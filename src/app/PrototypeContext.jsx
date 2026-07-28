@@ -15,6 +15,7 @@ const PrototypeContext = createContext(null)
 const STORAGE_PREFIX = 'collector.v2.'
 export const ANALYSIS_CONCURRENCY_LIMIT = 20
 let analysisSequence = 0
+let executionSequence = 0
 
 function nextAnalysisId(prefix) {
   analysisSequence = (analysisSequence + 1) % 100
@@ -48,6 +49,32 @@ function nextCandidateVersion(version) {
 function formatTimestamp(date = new Date()) {
   const pad = (value) => String(value).padStart(2, '0')
   return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+function buildRecoveryPlan(sourceExecutions, publishedAt = formatTimestamp()) {
+  const executions = sourceExecutions.filter(Boolean)
+  const sourceExecutionIds = executions.map((execution) => execution.id)
+  const firstFailureTime = executions
+    .map((execution) => execution.startedAt || execution.finishedAt)
+    .filter((value) => value && value !== '-')
+    .sort()[0]
+
+  return {
+    mode: '连续区间恢复',
+    start: firstFailureTime
+      ? `${firstFailureTime} 之前最后提交成功的游标；无成功游标时使用首次任务配置起点`
+      : '首次任务配置的起始边界；未配置时需人工确认',
+    end: `${publishedAt} 固化的修复发布快照`,
+    boundary: '起点不含，终点包含；失败执行不推进游标',
+    basis: sourceExecutionIds.length > 1
+      ? `合并 ${sourceExecutionIds.length} 次失败形成的连续缺口`
+      : sourceExecutionIds.length === 1
+        ? '从原失败执行向前回退到最后成功游标'
+        : '使用首次任务配置的起始边界',
+    sourceExecutionIds,
+    deduplication: '按来源 URL 与内容指纹幂等入库',
+    closure: '数据恢复成功且区间对账无未覆盖游标后关闭故障',
+  }
 }
 
 function createExecutionArticles(execution) {
@@ -253,6 +280,7 @@ export function PrototypeProvider({ children }) {
   const [capabilities, setCapabilities] = usePersistentState(`${STORAGE_PREFIX}capabilities`, initialCapabilities)
   const [users, setUsers] = usePersistentState(`${STORAGE_PREFIX}users`, initialUsers)
   const [auditEvents, setAuditEvents] = usePersistentState(`${STORAGE_PREFIX}audit`, [])
+  const [failureWorkflows, setFailureWorkflows] = usePersistentState(`${STORAGE_PREFIX}failure-workflows`, {})
   const [notificationCount, setNotificationCount] = useState(3)
   const defaultSiteFolderId = siteFolders.find((folder) => folder.isDefault)?.id || initialSiteFolders[0].id
 
@@ -292,6 +320,70 @@ export function PrototypeProvider({ children }) {
     setNotificationCount((count) => count + 1)
   }
 
+  const updateFailureWorkflows = (failureIds, patch) => {
+    const ids = [...new Set((Array.isArray(failureIds) ? failureIds : [failureIds]).filter(Boolean))]
+    if (!ids.length) return
+    setFailureWorkflows((current) => {
+      const next = { ...current }
+      ids.forEach((failureId) => {
+        const currentWorkflow = current[failureId] || { failureId }
+        next[failureId] = {
+          ...currentWorkflow,
+          ...(typeof patch === 'function' ? patch(currentWorkflow) : patch),
+          updatedAt: Date.now(),
+        }
+      })
+      return next
+    })
+  }
+
+  const createExecutionRecord = ({ task, rule, retrySource, purpose = '', failureIds = [], ruleVersion, taskName, url, recoveryPlan = null, blockedByExecutionId = '', status, readyAt }) => {
+    if (!task) return null
+    const collectionMode = task.collectionMode || task.scope || '增量'
+    const collectionType = ['修复验证', '缺口补采'].includes(purpose)
+      ? purpose
+      : retrySource?.collectionType || (collectionMode === '全量' ? '全量采集' : '定时增量')
+    const nextNumber = Math.max(Math.max(...executions.map((item) => Number(item.id.replace('EX-', ''))), 0) + 1, executionSequence + 1)
+    executionSequence = nextNumber
+    const execution = {
+      id: `EX-${nextNumber}`,
+      taskId: task.id || '',
+      task: taskName || task.name || `${task.site}采集计划`,
+      siteId: task.siteId || rule?.siteId || '',
+      site: task.site || rule?.site || '',
+      url: url || rule?.entryUrl || retrySource?.url || '-',
+      ruleId: rule?.id || task.ruleId,
+      ruleVersion: ruleVersion || task.ruleVersion || rule?.version,
+      status: status || (retrySource && purpose !== '修复验证' ? '重试中' : '运行中'),
+      discovered: 0,
+      articles: 0,
+      finishedAt: '-',
+      duration: '0m00s',
+      issue: '',
+      stage: '',
+      retryOf: retrySource?.id || '',
+      purpose,
+      failureIds,
+      recoveryPlan,
+      blockedByExecutionId,
+      isBootstrap: false,
+      collectionMode,
+      collectionType,
+      startedAt: formatTimestamp(),
+      readyAt: readyAt === undefined ? Date.now() + 1800 : readyAt,
+      logs: [`${new Date().toLocaleTimeString('zh-CN', { hour12: false })} ${collectionType}已进入执行队列`],
+    }
+    setExecutions((items) => [execution, ...items])
+    recordAudit(purpose === '修复验证'
+      ? '创建规则验证执行'
+      : purpose === '缺口补采'
+        ? '创建数据恢复执行'
+        : retrySource
+          ? '重试采集执行'
+          : '立即执行采集计划', execution.id)
+    return execution
+  }
+
   const updateBatchUrl = (batchId, urlId, patch) => {
     setIntakeBatches((batches) => batches.map((batch) => (
       batch.id === batchId
@@ -326,6 +418,7 @@ export function PrototypeProvider({ children }) {
 
     const host = getUrlHost(currentEntry.url)
     const existingRule = rules.find((rule) => rule.id === currentEntry.ruleId)
+    const currentSite = sites.find((site) => normalizeHost(site.host) === host)
     const nextRuleNumber = Math.max(...rules.map((rule) => Number(rule.id.replace('RP-', ''))), 0) + 1
     const ruleId = existingRule?.id || `RP-${String(nextRuleNumber).padStart(4, '0')}`
     const siteName = currentEntry.site || '待识别网站'
@@ -378,6 +471,7 @@ export function PrototypeProvider({ children }) {
     const version = stripReleaseCandidate(candidateVersion)
     const syncedTasks = tasks.filter((task) => task.ruleId === ruleId && task.versionPolicy === '跟随最新发布').length
     const boundTasks = tasks.filter((task) => task.ruleId === ruleId || task.site === siteName)
+    const linkedFailureIds = [...new Set([...(currentEntry.failureIds || []), currentEntry.failureId].filter(Boolean))]
     const publishedRule = {
       ...candidateRule,
       status: '已发布',
@@ -390,6 +484,65 @@ export function PrototypeProvider({ children }) {
       regressionMessage: 'AI 生成后自动回归通过，人工审核发布',
       health: '健康',
       repairSource: '',
+    }
+
+    const linkedSourceExecutionIds = [...new Set([...(currentEntry.sourceExecutionIds || []), currentEntry.sourceExecutionId].filter(Boolean))]
+    const sourceExecutions = executions.filter((execution) => linkedSourceExecutionIds.includes(execution.id))
+    const sourceExecution = sourceExecutions[0]
+    const sourceTask = tasks.find((task) => task.id === sourceExecution?.taskId)
+    const validationTask = sourceTask || boundTasks[0] || (linkedFailureIds.length ? {
+      id: `VALIDATION-${ruleId}`,
+      name: `${siteName}规则验证`,
+      siteId: currentSite?.id || '',
+      site: siteName,
+      ruleId,
+      ruleVersion: version,
+      collectionMode: '增量',
+    } : null)
+    const recoveryPlan = linkedFailureIds.length ? buildRecoveryPlan(sourceExecutions) : null
+    const validationExecution = linkedFailureIds.length
+      ? createExecutionRecord({
+          task: { ...validationTask, ruleId, ruleVersion: version },
+          rule: publishedRule,
+          retrySource: sourceExecution,
+          purpose: '修复验证',
+          failureIds: linkedFailureIds,
+          ruleVersion: version,
+          taskName: `${siteName}规则验证`,
+          url: currentEntry.url,
+          recoveryPlan,
+        })
+      : null
+    const recoveryExecution = validationExecution
+      ? createExecutionRecord({
+          task: { ...validationTask, ruleId, ruleVersion: version },
+          rule: publishedRule,
+          retrySource: sourceExecution,
+          purpose: '缺口补采',
+          failureIds: linkedFailureIds,
+          ruleVersion: version,
+          taskName: `${siteName}数据恢复`,
+          url: currentEntry.url,
+          recoveryPlan,
+          blockedByExecutionId: validationExecution.id,
+          status: '排队中',
+          readyAt: null,
+        })
+      : null
+
+    if (validationExecution) {
+      updateFailureWorkflows(linkedFailureIds, {
+        status: '验证中',
+        analysisEntryId: currentEntry.id,
+        analysisBatchId: batchId,
+        sourceExecutionId: linkedSourceExecutionIds[0] || '',
+        sourceExecutionIds: linkedSourceExecutionIds,
+        validationExecutionId: validationExecution.id,
+        recoveryExecutionId: recoveryExecution?.id || '',
+        recoveryPlan,
+        ruleId,
+        ruleVersion: version,
+      })
     }
 
     setIntakeBatches((batches) => batches.map((batch) => {
@@ -409,6 +562,9 @@ export function PrototypeProvider({ children }) {
         releasePhase: 'published',
         releaseVersion: version,
         releaseError: '',
+        validationExecutionId: validationExecution?.id || '',
+        recoveryExecutionId: recoveryExecution?.id || '',
+        recoveryPlan,
       } : row)
       return { ...batch, status: deriveBatchStatus(urls), urls, updatedAt: '刚刚' }
     }))
@@ -421,13 +577,22 @@ export function PrototypeProvider({ children }) {
     setSites((items) => items.map((site) => normalizeHost(site.host) === host && !['已停用', '已暂停'].includes(site.status)
       ? {
         ...site,
-        status: boundTasks.length ? '已完成' : '待配置',
+        status: linkedFailureIds.length ? '需处理' : boundTasks.length ? '已完成' : '待配置',
         entryUrl: currentEntry.url,
         freq: boundTasks[0]?.frequency || site.freq || '待配置',
       }
       : site))
     recordAudit('审核并发布 AI 采集规则', `${ruleId}/${version}`)
-    return { ok: true, ruleId, version, syncedTasks, boundTasks: boundTasks.length }
+    return {
+      ok: true,
+      ruleId,
+      version,
+      syncedTasks,
+      boundTasks: boundTasks.length,
+      validationExecutionId: validationExecution?.id || '',
+      recoveryExecutionId: recoveryExecution?.id || '',
+      recoveryPlan,
+    }
   }
 
   const importSites = (rows, source = '网站管理') => {
@@ -674,8 +839,10 @@ export function PrototypeProvider({ children }) {
     return true
   }
 
-  const startSiteAnalysis = ({ siteName, siteHost, url, ruleId, kind = 'reanalyze', failureId = '', sourceExecutionId = '', parentAnalysisId = '', source = '', folderId }) => {
+  const startSiteAnalysis = ({ siteName, siteHost, url, ruleId, kind = 'reanalyze', failureId = '', failureIds = [], sourceExecutionId = '', sourceExecutionIds = [], parentAnalysisId = '', source = '', folderId }) => {
     const normalizedHost = normalizeHost(siteHost || getUrlHost(url))
+    const linkedFailureIds = [...new Set([...(failureIds || []), failureId].filter(Boolean))]
+    const linkedSourceExecutionIds = [...new Set([...(sourceExecutionIds || []), sourceExecutionId].filter(Boolean))]
     const existing = intakeBatches.flatMap((batch) => batch.urls.map((entry) => ({ ...entry, batchId: batch.id })))
       .find((entry) => normalizeHost(entry.siteHost || getUrlHost(entry.url)) === normalizedHost && isAnalysisEntryActive(entry))
     if (existing) {
@@ -712,11 +879,22 @@ export function PrototypeProvider({ children }) {
               readyAt,
             } : {}),
             analysisKind: 'diagnose',
-            failureId: failureId || entry.failureId || '',
-            sourceExecutionId: sourceExecutionId || entry.sourceExecutionId || '',
+            failureId: linkedFailureIds[0] || entry.failureId || '',
+            failureIds: [...new Set([...(entry.failureIds || []), entry.failureId, ...linkedFailureIds].filter(Boolean))],
+            sourceExecutionId: linkedSourceExecutionIds[0] || entry.sourceExecutionId || '',
+            sourceExecutionIds: [...new Set([...(entry.sourceExecutionIds || []), entry.sourceExecutionId, ...linkedSourceExecutionIds].filter(Boolean))],
           } : entry),
         } : batch))
         if (shouldConvert) recordAudit('复用活动 AI 任务进行失败诊断', `${normalizedHost}/${ruleId || existing.ruleId || 'new-rule'}`)
+      }
+      if (kind === 'diagnose') {
+        updateFailureWorkflows(linkedFailureIds, {
+          status: '诊断中',
+          analysisEntryId: existing.id,
+          analysisBatchId: existing.batchId,
+          sourceExecutionId: linkedSourceExecutionIds[0] || existing.sourceExecutionId || '',
+          sourceExecutionIds: linkedSourceExecutionIds,
+        })
       }
       return { batchId: existing.batchId, entryId: existing.id, existing: true }
     }
@@ -746,8 +924,10 @@ export function PrototypeProvider({ children }) {
         status: '排队中',
         issue: '',
         analysisKind: kind,
-        failureId,
-        sourceExecutionId,
+        failureId: linkedFailureIds[0] || '',
+        failureIds: linkedFailureIds,
+        sourceExecutionId: linkedSourceExecutionIds[0] || '',
+        sourceExecutionIds: linkedSourceExecutionIds,
         parentAnalysisId,
         folderId: folderId || '',
         queuedAt: Date.now(),
@@ -757,6 +937,15 @@ export function PrototypeProvider({ children }) {
     setSites((items) => items.map((site) => normalizeHost(site.host) === normalizedHost && site.status !== '异常'
       ? { ...site, status: '分析中', entryUrl: url, ...(folderId !== undefined ? { folderId } : {}) }
       : site))
+    if (kind === 'diagnose') {
+      updateFailureWorkflows(linkedFailureIds, {
+        status: '诊断中',
+        analysisEntryId: entryId,
+        analysisBatchId: batchId,
+        sourceExecutionId: linkedSourceExecutionIds[0] || '',
+        sourceExecutionIds: linkedSourceExecutionIds,
+      })
+    }
     recordAudit(kind === 'diagnose' ? '发起网站 AI 诊断' : kind === 'onboarding' ? '创建网站 AI 分析任务' : '发起网站 AI 重新分析', `${normalizedHost}/${targetRuleId || 'new-rule'}`)
     return { batchId, entryId }
   }
@@ -883,36 +1072,7 @@ export function PrototypeProvider({ children }) {
     if (!task || task.status !== '启用') return null
     const rule = rules.find((item) => item.id === task.ruleId)
     const retrySource = retryOf ? executions.find((item) => item.id === retryOf) : null
-    const collectionMode = task.collectionMode || task.scope || '增量'
-    const collectionType = retrySource?.collectionType || (collectionMode === '全量' ? '全量采集' : '定时增量')
-    const nextNumber = Math.max(...executions.map((item) => Number(item.id.replace('EX-', ''))), 0) + 1
-    const execution = {
-      id: `EX-${nextNumber}`,
-      taskId: task.id,
-      task: `${task.site}采集计划`,
-      siteId: task.siteId || '',
-      site: task.site,
-      url: rule?.entryUrl || '-',
-      ruleId: task.ruleId,
-      ruleVersion: task.ruleVersion,
-      status: retryOf ? '重试中' : '运行中',
-      discovered: 0,
-      articles: 0,
-      finishedAt: '-',
-      duration: '0m00s',
-      issue: '',
-      stage: '',
-      retryOf,
-      isBootstrap: false,
-      collectionMode,
-      collectionType,
-      startedAt: formatTimestamp(),
-      readyAt: Date.now() + 1800,
-      logs: [`${new Date().toLocaleTimeString('zh-CN', { hour12: false })} ${collectionType}已进入执行队列`],
-    }
-    setExecutions((items) => [execution, ...items])
-    recordAudit(retryOf ? '重试采集执行' : '立即执行采集计划', execution.id)
-    return execution.id
+    return createExecutionRecord({ task, rule, retrySource })?.id || null
   }
 
   const saveCapabilityCandidate = (capabilityId, document) => {
@@ -1012,6 +1172,7 @@ export function PrototypeProvider({ children }) {
     setCapabilities(initialCapabilities)
     setUsers(initialUsers)
     setAuditEvents([])
+    setFailureWorkflows({})
     setNotificationCount(3)
   }
 
@@ -1063,17 +1224,63 @@ export function PrototypeProvider({ children }) {
       const due = pending.filter((execution) => execution.readyAt <= Date.now())
       if (!due.length) return
       const dueIds = new Set(due.map((execution) => execution.id))
+      const repairValidationExecutions = due.filter((execution) => execution.purpose === '修复验证')
+      const recoveryExecutions = due.filter((execution) => execution.purpose === '缺口补采')
+      const recoveryIdsToStart = new Set(executions
+        .filter((execution) => execution.purpose === '缺口补采' && dueIds.has(execution.blockedByExecutionId))
+        .map((execution) => execution.id))
+      const completedRecoveryBySourceExecution = new Map()
+      recoveryExecutions.forEach((execution) => {
+        ;(execution.recoveryPlan?.sourceExecutionIds || []).forEach((sourceExecutionId) => {
+          completedRecoveryBySourceExecution.set(sourceExecutionId, execution)
+        })
+      })
       const completedAt = formatTimestamp()
-      setExecutions((items) => items.map((execution) => dueIds.has(execution.id) ? {
-        ...execution,
-        status: '成功',
-        discovered: 5,
-        articles: 3,
-        finishedAt: completedAt,
-        duration: '0m02s',
-        readyAt: null,
-        logs: [...execution.logs, '列表发现 5 条候选记录', '正文入库 3 条', '质量检查通过，执行完成'],
-      } : execution))
+      setExecutions((items) => items.map((execution) => {
+        if (dueIds.has(execution.id)) {
+          return {
+            ...execution,
+            status: '成功',
+            discovered: execution.purpose === '修复验证' ? 5 : 18,
+            articles: execution.purpose === '修复验证' ? 0 : execution.purpose === '缺口补采' ? 15 : 3,
+            validationPassed: execution.purpose === '修复验证' ? 5 : execution.validationPassed,
+            validationTotal: execution.purpose === '修复验证' ? 5 : execution.validationTotal,
+            finishedAt: completedAt,
+            duration: '0m02s',
+            readyAt: null,
+            reconciliation: execution.purpose === '缺口补采' ? '区间对账通过，无未覆盖游标' : execution.reconciliation,
+            logs: execution.purpose === '修复验证'
+              ? [...execution.logs, '代表页面 5/5 通过', '原失败阶段通过，允许启动数据恢复']
+              : execution.purpose === '缺口补采'
+                ? [...execution.logs, '按恢复区间发现 18 条记录', '幂等入库 15 条，重复 3 条', '区间对账通过，无未覆盖游标']
+                : [...execution.logs, '列表发现 5 条候选记录', '正文入库 3 条', '质量检查通过，执行完成'],
+          }
+        }
+        if (recoveryIdsToStart.has(execution.id)) {
+          return {
+            ...execution,
+            status: '运行中',
+            startedAt: formatTimestamp(),
+            readyAt: Date.now() + 1800,
+            logs: [...execution.logs, '规则验证已通过，开始按锁定区间恢复数据'],
+          }
+        }
+        const recoveryExecution = completedRecoveryBySourceExecution.get(execution.id)
+        if (recoveryExecution) {
+          return {
+            ...execution,
+            resolution: {
+              status: '已处置',
+              recoveryExecutionId: recoveryExecution.id,
+              validationExecutionId: recoveryExecution.blockedByExecutionId,
+              ruleVersion: recoveryExecution.ruleVersion,
+              resolvedAt: completedAt,
+              recoveryPlan: recoveryExecution.recoveryPlan,
+            },
+          }
+        }
+        return execution
+      }))
       const bootstrappedTaskIds = new Set(due.filter((execution) => execution.isBootstrap).map((execution) => execution.taskId))
       if (bootstrappedTaskIds.size) {
         setTasks((items) => items.map((task) => bootstrappedTaskIds.has(task.id) ? {
@@ -1084,9 +1291,29 @@ export function PrototypeProvider({ children }) {
           nextRun: task.continuousEnabled === false ? '—' : '待计算',
         } : task))
       }
-      setArticles((items) => [...due.flatMap(createExecutionArticles), ...items])
+      if (repairValidationExecutions.length) {
+        const validatingFailureIds = repairValidationExecutions.flatMap((execution) => execution.failureIds || [])
+        updateFailureWorkflows(validatingFailureIds, (workflow) => ({
+          status: '补采中',
+          validationExecutionId: workflow.validationExecutionId,
+        }))
+      }
+      if (recoveryExecutions.length) {
+        const repairedSites = new Set(recoveryExecutions.map((execution) => execution.site))
+        const resolvedFailureIds = recoveryExecutions.flatMap((execution) => execution.failureIds || [])
+        setSites((items) => items.map((site) => repairedSites.has(site.name) && !['已停用', '已暂停'].includes(site.status)
+          ? { ...site, status: '已完成', last: '刚刚' }
+          : site))
+        updateFailureWorkflows(resolvedFailureIds, (workflow) => ({
+          status: '已解决',
+          resolvedAt: Date.now(),
+          recoveryExecutionId: workflow.recoveryExecutionId,
+          reconciliation: '区间对账通过，无未覆盖游标',
+        }))
+      }
+      setArticles((items) => [...due.filter((execution) => execution.purpose !== '修复验证').flatMap(createExecutionArticles), ...items])
       setAuditEvents((items) => [
-        ...due.map((execution) => ({ id: `AU-${execution.id}-complete`, action: '采集执行完成', object: `${execution.id}/3 条原文`, operator: 'system', time: new Date().toLocaleString('zh-CN', { hour12: false }) })),
+        ...due.map((execution) => ({ id: `AU-${execution.id}-complete`, action: execution.purpose === '修复验证' ? '规则验证通过' : execution.purpose === '缺口补采' ? '数据恢复与对账完成' : '采集执行完成', object: `${execution.id}/${execution.purpose || '普通采集'}`, operator: 'system', time: new Date().toLocaleString('zh-CN', { hour12: false }) })),
         ...items,
       ].slice(0, 30))
       setNotificationCount((count) => count + due.length)
@@ -1231,9 +1458,11 @@ export function PrototypeProvider({ children }) {
     capabilities,
     users,
     auditEvents,
+    failureWorkflows,
     notificationCount,
     setNotificationCount,
     updateBatchUrl,
+    updateFailureWorkflows,
     approveBatchUrl,
     importSites,
     createSiteFolder,
@@ -1259,7 +1488,7 @@ export function PrototypeProvider({ children }) {
     publishCapability,
     resolveArticleQuality,
     resetPrototype,
-  }), [rules, tasks, executions, articles, intakeBatches, sites, siteFolders, defaultSiteFolderId, capabilities, users, auditEvents, notificationCount])
+  }), [rules, tasks, executions, articles, intakeBatches, sites, siteFolders, defaultSiteFolderId, capabilities, users, auditEvents, failureWorkflows, notificationCount])
 
   return <PrototypeContext.Provider value={value}>{children}</PrototypeContext.Provider>
 }

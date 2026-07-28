@@ -2011,6 +2011,61 @@ select {
   border-radius: 8px;
 }
 
+.ai-recovery-preview p {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.ai-recovery-preview dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 10px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid rgba(166, 107, 0, .18);
+}
+
+.ai-recovery-preview dl > div,
+.ai-recovery-confirm dl > div {
+  min-width: 0;
+}
+
+.ai-recovery-preview dt,
+.ai-recovery-confirm dt {
+  color: #8a6d34;
+  font-size: 10.5px;
+}
+
+.ai-recovery-preview dd,
+.ai-recovery-confirm dd {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+  color: #4d412d;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.ai-recovery-confirm > p {
+  margin: 0;
+  color: #475467;
+  line-height: 1.65;
+}
+
+.ai-recovery-confirm dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 18px;
+  margin: 16px 0;
+  padding: 14px 0;
+  border-top: 1px solid #eaecf0;
+  border-bottom: 1px solid #eaecf0;
+}
+
+.ai-recovery-confirm dt { color: #8592a6; }
+.ai-recovery-confirm dd { color: #273247; }
+.ai-recovery-confirm small { color: #667085; line-height: 1.6; }
+
 .ai-approval-handoff {
   display: flex;
   flex-direction: column;
@@ -4528,6 +4583,17 @@ select {
   margin: 0 auto;
 }
 
+.execution-status-stack {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.execution-status-stack .ant-tag {
+  margin: 0;
+}
+
 .records-toolbar {
   display: flex;
   align-items: flex-start;
@@ -4631,6 +4697,46 @@ select {
   font-size: 11.5px;
   line-height: 1.65;
   background: #101625;
+}
+
+.execution-validation-result {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 18px 22px 22px;
+  padding: 18px 0;
+  color: #0f8a52;
+  border-top: 1px solid #eaecf0;
+  border-bottom: 1px solid #eaecf0;
+}
+
+.execution-validation-result > .anticon {
+  margin-top: 2px;
+  font-size: 22px;
+}
+
+.execution-validation-result span,
+.execution-validation-result strong,
+.execution-validation-result small {
+  display: block;
+}
+
+.execution-validation-result span {
+  color: #8592a6;
+  font-size: 10.5px;
+}
+
+.execution-validation-result strong {
+  margin-top: 3px;
+  color: #1f2937;
+  font-size: 14px;
+}
+
+.execution-validation-result small {
+  margin-top: 4px;
+  color: #667085;
+  font-size: 11.5px;
+  line-height: 1.55;
 }
 
 .batch-details-title {
@@ -5324,6 +5430,21 @@ select {
   background: #fff0f2;
 }
 
+.failure-resolution-status.validating {
+  color: #4b56d6;
+  background: #eef0ff;
+}
+
+.failure-resolution-status.recovering {
+  color: #9a6300;
+  background: #fff5df;
+}
+
+.failure-resolution-status.resolved {
+  color: #07864f;
+  background: #e9f8f1;
+}
+
 .failure-summary {
   margin-top: 14px;
   color: #8592a6;
@@ -5556,6 +5677,54 @@ select {
 
 .failure-workbench-section {
   margin-top: 20px;
+}
+
+.failure-recovery-plan {
+  padding: 14px;
+  background: #f7f9fc;
+  border: 1px solid #e5e9f0;
+  border-radius: 7px;
+}
+
+.failure-recovery-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.failure-recovery-grid > div {
+  min-width: 0;
+  padding: 10px;
+  background: #fff;
+  border: 1px solid #e8ebf0;
+  border-radius: 6px;
+}
+
+.failure-recovery-grid span,
+.failure-recovery-grid strong {
+  display: block;
+}
+
+.failure-recovery-grid span {
+  color: #8a95a7;
+  font-size: 10.5px;
+}
+
+.failure-recovery-grid strong {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  color: #273247;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.failure-recovery-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 10px;
+  color: #69758a;
+  font-size: 10.5px;
 }
 
 .failure-section-heading {
@@ -7065,6 +7234,7 @@ select {
 }
 
 @media (max-width: 900px) {
+  .ai-recovery-preview dl { grid-template-columns: 1fr; }
   .site-workspace-header {
     grid-template-columns: 42px minmax(0, 1fr);
     align-items: start;
@@ -7139,6 +7309,7 @@ select {
 }
 
 @media (max-width: 680px) {
+  .ai-recovery-confirm dl { grid-template-columns: 1fr; }
   .site-workspace-breadcrumb { margin-bottom: 9px; }
   .site-workspace-header {
     min-height: 0;
