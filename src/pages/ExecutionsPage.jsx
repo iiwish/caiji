@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Alert, Button, DatePicker, Grid, Input, Modal, Select, Table } from 'antd'
-import { CalendarOutlined, CheckCircleOutlined, ClearOutlined, DatabaseOutlined, GlobalOutlined, SearchOutlined, ToolOutlined } from '@ant-design/icons'
+import { Alert, App as AntApp, Button, DatePicker, Grid, Input, Modal, Select, Table } from 'antd'
+import { CalendarOutlined, CheckCircleOutlined, ClearOutlined, DatabaseOutlined, GlobalOutlined, ReloadOutlined, SearchOutlined, ToolOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { useNavigate, useOutletContext, useParams, useSearchParams } from 'react-router-dom'
 import { EntityLink, RowActions, SectionCard, StatusTag } from '../components/ConsoleUI'
 import { usePrototype } from '../app/PrototypeContext'
 import { recordDetails } from '../data'
 import { getSiteRulePath, getSiteWorkspacePath } from '../app/routes'
+import { getExecutionAttemptCount, getExecutionAttempts } from '../app/executionModel'
 
 const { RangePicker } = DatePicker
 const EXECUTION_STATUS_OPTIONS = ['进行中', '成功', '需要处理', '处理中', '已处置', '已取消']
@@ -42,7 +43,7 @@ function getExecutionBusinessStatus(row, workflow) {
   if (['排队中', '运行中', '重试中'].includes(row.status)) {
     return { label: row.status, group: '进行中' }
   }
-  if (row.status === '成功') return { label: '成功', group: '成功' }
+  if (row.status === '成功') return { label: getExecutionAttemptCount(row) > 1 ? '成功（重试后）' : '成功', group: '成功' }
   if (['已取消', '取消'].includes(row.status)) return { label: '已取消', group: '已取消' }
   return { label: row.status, group: row.status }
 }
@@ -94,7 +95,7 @@ function getBatchRecords(execution) {
   })
 }
 
-function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewRule, onViewTask, onViewExecution }) {
+function BatchDetailsModal({ execution, open, onClose, onRepairRule, onRetry, onViewRule, onViewTask, onViewExecution }) {
   const [detailSearch, setDetailSearch] = useState('')
   const [page, setPage] = useState(1)
   const records = useMemo(() => getBatchRecords(execution), [execution])
@@ -110,6 +111,8 @@ function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewRule,
   const validationPassed = execution?.validationPassed || execution?.discovered || 0
   const validationTotal = execution?.validationTotal || execution?.discovered || 5
   const sourceExecutionCount = execution?.recoveryPlan?.sourceExecutionIds?.length || (execution?.retryOf ? 1 : 0)
+  const attempts = getExecutionAttempts(execution)
+  const hasRetryHistory = attempts.length > 1
 
   useEffect(() => {
     setDetailSearch('')
@@ -136,7 +139,7 @@ function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewRule,
           <span className="batch-details-title-icon"><DatabaseOutlined /></span>
           <div>
             <div className="batch-details-title-line"><strong>采集明细</strong><span className="mono">{getBatchId(execution)}</span></div>
-            <p>{execution.site} · {execution.collectionType || execution.purpose || '采集执行'} · {isValidation ? <>验证样本 <b className="mono">{validationPassed}/{validationTotal}</b></> : <>入库 <b className="mono">{execution.articles.toLocaleString()}</b> 条</>} · {execution.finishedAt}{sourceExecutionCount > 1 ? <> · 关联 <b className="mono">{sourceExecutionCount}</b> 个原失败执行</> : execution.retryOf ? <> · 关联原执行 <b className="mono">{getBatchId({ id: execution.retryOf })}</b></> : null}</p>
+            <p>{execution.site} · {execution.collectionType || execution.purpose || '采集执行'} · {isValidation ? <>验证样本 <b className="mono">{validationPassed}/{validationTotal}</b></> : <>入库 <b className="mono">{execution.articles.toLocaleString()}</b> 条</>} · <b className="mono">{attempts.length}</b> 次尝试 · {execution.finishedAt}{sourceExecutionCount > 1 ? <> · 关联 <b className="mono">{sourceExecutionCount}</b> 个原失败执行</> : execution.retryOf ? <> · 关联原执行 <b className="mono">{getBatchId({ id: execution.retryOf })}</b></> : null}</p>
           </div>
         </div>
       )}
@@ -164,6 +167,24 @@ function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewRule,
           description={`${execution.recoveryPlan.start} → ${execution.recoveryPlan.end}；${execution.recoveryPlan.boundary || '起点不含，终点包含；失败执行不推进游标'}；${execution.recoveryPlan.basis}；${execution.reconciliation || execution.recoveryPlan.deduplication}。`}
         />
       )}
+      {hasRetryHistory && execution?.status === '成功' && (
+        <Alert
+          className="execution-retry-success-alert"
+          type="success"
+          showIcon
+          title={`同一采集记录在第 ${attempts.length} 次尝试后成功`}
+          description="采集记录 ID 和采集区间保持不变；失败尝试的状态、规则版本和日志继续保留在下方尝试历史中。"
+        />
+      )}
+      {execution?.status === '重试中' && (
+        <Alert
+          className="execution-retry-success-alert"
+          type="info"
+          showIcon
+          title={`正在执行第 ${attempts.length} 次尝试`}
+          description="本次重试不会新增采集记录，完成后会直接更新当前记录的最终状态。"
+        />
+      )}
       {execution && ['失败', '部分失败'].includes(execution.status) && (
         <Alert
           className="execution-diagnostic-alert"
@@ -175,19 +196,45 @@ function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewRule,
             ? <Button onClick={() => onViewRule(execution)}>查看修复规则</Button>
             : isRuleFailure(execution)
               ? <Button type="primary" danger icon={<ToolOutlined />} onClick={() => onRepairRule(execution)}>修复网站规则</Button>
-            : <Button onClick={() => onViewTask(execution)}>查看采集计划</Button>}
+            : <Button type="primary" icon={<ReloadOutlined />} onClick={() => onRetry(execution)}>重试本次执行</Button>}
         />
-      )}
-      {execution?.logs?.length > 0 && (['失败', '部分失败'].includes(execution.status) || isFailureRetry) && (
-        <details className="execution-diagnostic-log">
-          <summary>{isFailureRetry ? '查看重试过程日志' : '查看执行日志'}</summary>
-          <pre className="mono">{execution.logs.join('\n')}</pre>
-        </details>
       )}
       {isFailureRetry && (
         <section className="execution-validation-result" aria-label="故障重试过程">
           <CheckCircleOutlined />
           <div><span>故障重试过程</span><strong>{execution.status === '成功' ? '规则验证、缺口采集和范围对账均已完成' : '正在验证新规则并恢复合并缺口'}</strong><small>这三个阶段归入同一条故障重试记录；所有原失败执行单独保留并关联到本记录。</small></div>
+        </section>
+      )}
+      {attempts.length > 0 && (
+        <section className="execution-attempt-history" aria-label="执行尝试历史">
+          <header>
+            <div><h3>执行尝试</h3><span>同一采集记录 · {attempts.length} 次</span></div>
+            <small>重试不会新增顶层采集记录</small>
+          </header>
+          <div className="execution-attempt-list">
+            {[...attempts].reverse().map((attempt, index) => (
+              <article className={index === 0 ? 'latest' : ''} key={attempt.number}>
+                <div className="execution-attempt-head">
+                  <strong>尝试 #{attempt.number}</strong>
+                  <StatusTag value={attempt.status === '部分失败' ? '部分成功' : attempt.status} />
+                  {index === 0 && <span>最近一次</span>}
+                  <time className="mono">{attempt.startedAt || '—'} → {attempt.finishedAt || '—'}</time>
+                </div>
+                <dl>
+                  <div><dt>规则版本</dt><dd className="mono">{attempt.ruleVersion || execution.ruleVersion || '—'}</dd></div>
+                  <div><dt>发现</dt><dd className="mono">{attempt.discovered || 0}</dd></div>
+                  <div><dt>入库</dt><dd className="mono">{attempt.articles || 0}</dd></div>
+                  <div><dt>耗时</dt><dd className="mono">{attempt.duration || '—'}</dd></div>
+                </dl>
+                {(attempt.issue || attempt.logs?.length > 0) && (
+                  <details open={index === 0 && ['失败', '部分失败', '重试中'].includes(attempt.status)}>
+                    <summary>{attempt.issue || `${attempt.logs.length} 条执行日志`}</summary>
+                    <pre className="mono">{(attempt.logs || []).join('\n')}</pre>
+                  </details>
+                )}
+              </article>
+            ))}
+          </div>
         </section>
       )}
       {isValidation ? (
@@ -242,11 +289,12 @@ function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewRule,
 }
 
 function ExecutionsList({ initialExecution }) {
+  const { message } = AntApp.useApp()
   const navigate = useNavigate()
   const { search } = useOutletContext()
   const [params] = useSearchParams()
   const screens = Grid.useBreakpoint()
-  const { executions, tasks, sites, failureWorkflows } = usePrototype()
+  const { executions, tasks, sites, failureWorkflows, retryExecution } = usePrototype()
   const statusParam = params.get('status')
   const siteParam = params.get('site')
   const [siteFilter, setSiteFilter] = useState(siteParam || undefined)
@@ -323,10 +371,22 @@ function ExecutionsList({ initialExecution }) {
   }
   const selectedExecutionWithType = selectedExecution ? { ...selectedExecution, collectionType: getExecutionType(selectedExecution, tasks) } : null
 
+  const retryRow = (row) => {
+    const executionId = retryExecution(row.id)
+    if (!executionId) {
+      message.warning('当前采集记录不能重试，请检查采集计划状态')
+      return
+    }
+    message.success(`${getBatchId(row)} 已开始第 ${getExecutionAttemptCount(row) + 1} 次尝试`)
+    setSelectedExecution(null)
+  }
+
   const renderActions = (row) => {
+    const canRetry = ['失败', '部分失败'].includes(row.status) && !row.resolution && !isRuleFailure(row)
     const menuItems = [
       ...(row.resolution ? [{ key: 'resolution', icon: <CheckCircleOutlined />, label: '查看重试结果', onClick: () => navigate(`/executions/${row.resolution.retryExecutionId || row.resolution.recoveryExecutionId}`) }] : []),
       ...(isRuleFailure(row) && !row.resolution ? [{ key: 'repair-rule', icon: <ToolOutlined />, label: '修复网站规则', onClick: () => navigate(getExecutionRulePath(row, true)) }] : []),
+      ...(canRetry ? [{ key: 'retry', icon: <ReloadOutlined />, label: '重试本次执行', onClick: () => retryRow(row) }] : []),
       { key: 'task', icon: <CalendarOutlined />, label: '查看采集计划', onClick: () => {
         const site = getExecutionSite(row)
         navigate(site ? getSiteWorkspacePath(site, 'plan') : `/tasks?task=${row.taskId}`)
@@ -343,6 +403,7 @@ function ExecutionsList({ initialExecution }) {
     { title: '批次 ID', dataIndex: 'id', width: 148, render: (_, row) => <EntityLink title={getBatchId(row)} titleClassName="mono" onClick={() => openDetails(row)} ariaLabel={`查看批次 ${getBatchId(row)}`} /> },
     { title: '网站', dataIndex: 'site', width: 215, render: (value) => <span className="table-single-value" title={value}>{value}</span> },
     { title: '采集类型', dataIndex: 'collectionType', width: 112, render: (value) => <span className={`collection-mode-tag ${value.includes('全量') ? 'full' : 'incremental'}`}>{value}</span> },
+    { title: '尝试', width: 72, align: 'right', render: (_, row) => <span className="mono execution-attempt-count">{getExecutionAttemptCount(row)} 次</span> },
     { title: '执行结果', width: 110, align: 'right', render: (_, row) => <span className="mono value-strong">{getExecutionResult(row)}</span> },
     { title: '耗时', dataIndex: 'duration', width: 82, align: 'right', render: (value) => <span className="mono muted execution-duration">{value}</span> },
     { title: '完成时间', dataIndex: 'finishedAt', width: 116, render: (value) => <span className="mono muted execution-finished-at">{value}</span> },
@@ -372,6 +433,7 @@ function ExecutionsList({ initialExecution }) {
                 <div className="execution-mobile-source"><strong>{row.site}</strong></div>
                 <dl>
                   <div><dt>采集类型</dt><dd>{getExecutionType(row, tasks)}</dd></div>
+                  <div><dt>执行尝试</dt><dd className="mono">{getExecutionAttemptCount(row)} 次</dd></div>
                   <div><dt>执行结果</dt><dd className="mono value-strong">{getExecutionResult(row)}</dd></div>
                   <div><dt>完成时间</dt><dd className="mono">{row.finishedAt}</dd></div>
                   <div><dt>耗时</dt><dd className="mono">{row.duration}</dd></div>
@@ -392,6 +454,7 @@ function ExecutionsList({ initialExecution }) {
         open={Boolean(selectedExecution)}
         onClose={closeDetails}
         onRepairRule={(row) => navigate(getExecutionRulePath(row, true))}
+        onRetry={retryRow}
         onViewRule={(row) => {
           const site = getExecutionSite(row)
           navigate(site ? getSiteWorkspacePath(site, 'rule') : getExecutionRulePath(row))

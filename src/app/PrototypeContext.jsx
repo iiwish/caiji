@@ -10,6 +10,7 @@ import {
 } from '../mock/domainData'
 import { siteRows as initialSites } from '../data'
 import { initialSiteFolders, migrateSiteFolders } from './siteFolderModel'
+import { getExecutionAttempts } from './executionModel'
 
 const PrototypeContext = createContext(null)
 const STORAGE_PREFIX = 'collector.v2.'
@@ -81,8 +82,9 @@ function createExecutionArticles(execution) {
   const collectedAt = formatTimestamp()
   const publishTime = new Date().toISOString().slice(0, 10)
   const titles = ['采购项目公开招标公告', '信息化服务项目竞争性磋商公告', '工程建设项目资格预审公告']
+  const attemptNumber = getExecutionAttempts(execution).length
   return titles.map((title, index) => enrichArticleDedup({
-    id: `AR-${execution.id.replace('EX-', '')}-${index + 1}`,
+    id: `AR-${execution.id.replace('EX-', '')}-A${attemptNumber}-${index + 1}`,
     title: `${execution.site}${title}`,
     site: execution.site,
     publishTime,
@@ -90,7 +92,7 @@ function createExecutionArticles(execution) {
     quality: '通过',
     executionId: execution.id,
     ruleId: execution.ruleId,
-    url: `${execution.url}${execution.url.includes('?') ? '&' : '?'}prototype_article=${index + 1}`,
+    url: `${execution.url}${execution.url.includes('?') ? '&' : '?'}prototype_attempt=${attemptNumber}&prototype_article=${index + 1}`,
     rawType: 'html',
     rawContent: `<article class="notice-detail"><h1>${execution.site}${title}</h1><time datetime="${publishTime}">${publishTime}</time><div class="content">本条原文由 ${execution.task} 采集，已通过标题、正文长度、发布时间和重复性检查。</div></article>`,
     content: `本条原文由 ${execution.task} 采集，已通过标题、正文长度、发布时间和重复性检查。`,
@@ -345,8 +347,12 @@ export function PrototypeProvider({ children }) {
       : retrySource?.collectionType || (collectionMode === '全量' ? '全量采集' : '定时增量')
     const nextNumber = Math.max(Math.max(...executions.map((item) => Number(item.id.replace('EX-', ''))), 0) + 1, executionSequence + 1)
     executionSequence = nextNumber
+    const executionId = `EX-${nextNumber}`
+    const startedAt = formatTimestamp()
+    const executionStatus = status || (retrySource && purpose !== '修复验证' ? '重试中' : '运行中')
+    const firstLog = `${new Date().toLocaleTimeString('zh-CN', { hour12: false })} ${collectionType}已进入执行队列`
     const execution = {
-      id: `EX-${nextNumber}`,
+      id: executionId,
       taskId: task.id || '',
       task: taskName || task.name || `${task.site}采集计划`,
       siteId: task.siteId || rule?.siteId || '',
@@ -354,7 +360,7 @@ export function PrototypeProvider({ children }) {
       url: url || rule?.entryUrl || retrySource?.url || '-',
       ruleId: rule?.id || task.ruleId,
       ruleVersion: ruleVersion || task.ruleVersion || rule?.version,
-      status: status || (retrySource && purpose !== '修复验证' ? '重试中' : '运行中'),
+      status: executionStatus,
       discovered: 0,
       articles: 0,
       finishedAt: '-',
@@ -369,9 +375,23 @@ export function PrototypeProvider({ children }) {
       isBootstrap: false,
       collectionMode,
       collectionType,
-      startedAt: formatTimestamp(),
+      startedAt,
       readyAt: readyAt === undefined ? Date.now() + 1800 : readyAt,
-      logs: [`${new Date().toLocaleTimeString('zh-CN', { hour12: false })} ${collectionType}已进入执行队列`],
+      logs: [firstLog],
+      attempts: [{
+        number: 1,
+        status: executionStatus,
+        startedAt,
+        finishedAt: '-',
+        duration: '0m00s',
+        ruleVersion: ruleVersion || task.ruleVersion || rule?.version,
+        discovered: 0,
+        articles: 0,
+        issue: '',
+        stage: '',
+        purpose,
+        logs: [firstLog],
+      }],
     }
     setExecutions((items) => [execution, ...items])
     recordAudit(purpose === '修复验证'
@@ -502,7 +522,8 @@ export function PrototypeProvider({ children }) {
       collectionMode: '增量',
     } : null)
     const recoveryPlan = linkedFailureIds.length ? buildRecoveryPlan(sourceExecutions) : null
-    const retryExecution = linkedFailureIds.length
+    const appendAttemptToSource = linkedFailureIds.length > 0 && sourceExecutions.length === 1
+    const mergedRecoveryExecution = linkedFailureIds.length && !appendAttemptToSource
       ? createExecutionRecord({
           task: { ...retryTask, ruleId, ruleVersion: version },
           rule: publishedRule,
@@ -515,15 +536,23 @@ export function PrototypeProvider({ children }) {
           recoveryPlan,
         })
       : null
+    const retryExecutionId = appendAttemptToSource
+      ? retryExecution(sourceExecution.id, {
+          ruleVersion: version,
+          failureIds: linkedFailureIds,
+          purpose: '规则修复重试',
+          recoveryPlan,
+        })
+      : mergedRecoveryExecution?.id || ''
 
-    if (retryExecution) {
+    if (retryExecutionId) {
       updateFailureWorkflows(linkedFailureIds, {
         status: '重试中',
         analysisEntryId: currentEntry.id,
         analysisBatchId: batchId,
         sourceExecutionId: linkedSourceExecutionIds[0] || '',
         sourceExecutionIds: linkedSourceExecutionIds,
-        retryExecutionId: retryExecution.id,
+        retryExecutionId,
         recoveryPlan,
         ruleId,
         ruleVersion: version,
@@ -547,7 +576,7 @@ export function PrototypeProvider({ children }) {
         releasePhase: 'published',
         releaseVersion: version,
         releaseError: '',
-        retryExecutionId: retryExecution?.id || '',
+        retryExecutionId,
         recoveryPlan,
       } : row)
       return { ...batch, status: deriveBatchStatus(urls), urls, updatedAt: '刚刚' }
@@ -573,7 +602,7 @@ export function PrototypeProvider({ children }) {
       version,
       syncedTasks,
       boundTasks: boundTasks.length,
-      retryExecutionId: retryExecution?.id || '',
+      retryExecutionId,
       recoveryPlan,
     }
   }
@@ -1049,13 +1078,76 @@ export function PrototypeProvider({ children }) {
     return nextUser
   }
 
+  const retryExecution = (executionId, options = {}) => {
+    const source = executions.find((execution) => execution.id === executionId)
+    if (!source || ['运行中', '重试中', '排队中'].includes(source.status)) return null
+    const task = tasks.find((item) => item.id === source.taskId)
+    if (!task) return null
+
+    const attempts = getExecutionAttempts(source)
+    const nextAttemptNumber = Math.max(...attempts.map((attempt) => attempt.number || 0), 0) + 1
+    const startedAt = formatTimestamp()
+    const ruleVersion = options.ruleVersion || source.ruleVersion || task.ruleVersion
+    const linkedFailureIds = [...new Set([...(source.failureIds || []), ...(options.failureIds || [])].filter(Boolean))]
+    const purpose = options.purpose || ''
+    const firstLog = `${new Date().toLocaleTimeString('zh-CN', { hour12: false })} 第 ${nextAttemptNumber} 次尝试已进入执行队列`
+    const nextAttempt = {
+      number: nextAttemptNumber,
+      status: '重试中',
+      startedAt,
+      finishedAt: '-',
+      duration: '0m00s',
+      ruleVersion,
+      discovered: 0,
+      articles: 0,
+      issue: '',
+      stage: '',
+      purpose,
+      logs: [firstLog],
+    }
+
+    setExecutions((items) => items.map((execution) => execution.id === executionId ? {
+      ...execution,
+      status: '重试中',
+      originalStatus: execution.originalStatus || execution.status,
+      ruleVersion,
+      issue: '',
+      stage: '',
+      finishedAt: '-',
+      duration: '0m00s',
+      startedAt,
+      readyAt: options.readyAt === undefined ? Date.now() + 1800 : options.readyAt,
+      retryCount: nextAttemptNumber - 1,
+      activeAttempt: nextAttemptNumber,
+      failureIds: linkedFailureIds,
+      recoveryPlan: options.recoveryPlan || execution.recoveryPlan,
+      attempts: [...attempts, nextAttempt],
+      logs: [firstLog],
+    } : execution))
+
+    if (linkedFailureIds.length) {
+      updateFailureWorkflows(linkedFailureIds, {
+        status: '重试中',
+        sourceExecutionId: executionId,
+        sourceExecutionIds: [executionId],
+        retryExecutionId: executionId,
+        recoveryPlan: options.recoveryPlan || source.recoveryPlan || null,
+        ruleId: source.ruleId,
+        ruleVersion,
+      })
+    }
+    recordAudit('重试采集执行', `${executionId}/attempt-${nextAttemptNumber}`)
+    return executionId
+  }
+
   const runTask = (taskId, retryOf = '', overrides = {}) => {
     const storedTask = tasks.find((item) => item.id === taskId)
     const task = storedTask ? { ...storedTask, ...overrides } : null
-    if (!task || task.status !== '启用') return null
+    if (!task) return null
+    if (retryOf) return retryExecution(retryOf, { ruleVersion: task.ruleVersion, failureIds: overrides.failureIds || [] })
+    if (task.status !== '启用') return null
     const rule = rules.find((item) => item.id === task.ruleId)
-    const retrySource = retryOf ? executions.find((item) => item.id === retryOf) : null
-    return createExecutionRecord({ task, rule, retrySource })?.id || null
+    return createExecutionRecord({ task, rule })?.id || null
   }
 
   const saveCapabilityCandidate = (capabilityId, document) => {
@@ -1210,6 +1302,7 @@ export function PrototypeProvider({ children }) {
       const repairValidationExecutions = due.filter((execution) => execution.purpose === '修复验证')
       const recoveryExecutions = due.filter((execution) => execution.purpose === '缺口补采')
       const failureRetryExecutions = due.filter((execution) => execution.purpose === '故障重试')
+      const retryAttemptExecutions = due.filter((execution) => getExecutionAttempts(execution).length > 1)
       const recoveryIdsToStart = new Set(executions
         .filter((execution) => execution.purpose === '缺口补采' && dueIds.has(execution.blockedByExecutionId))
         .map((execution) => execution.id))
@@ -1222,24 +1315,55 @@ export function PrototypeProvider({ children }) {
       const completedAt = formatTimestamp()
       setExecutions((items) => items.map((execution) => {
         if (dueIds.has(execution.id)) {
+          const attempts = getExecutionAttempts(execution)
+          const isRetryAttempt = attempts.length > 1
+          const retryRecovered = Math.max(1, (execution.discovered || 3) - (execution.articles || 0))
+          const attemptDiscovered = execution.purpose === '修复验证'
+            ? 5
+            : ['缺口补采', '故障重试'].includes(execution.purpose)
+              ? 18
+              : isRetryAttempt
+                ? retryRecovered
+                : 5
+          const attemptArticles = execution.purpose === '修复验证'
+            ? 0
+            : ['缺口补采', '故障重试'].includes(execution.purpose)
+              ? 15
+              : isRetryAttempt
+                ? retryRecovered
+                : 3
+          const completedLogs = execution.purpose === '修复验证'
+            ? [...execution.logs, '代表页面 5/5 通过', '原失败阶段通过，允许启动数据恢复']
+            : execution.purpose === '缺口补采'
+              ? [...execution.logs, '按恢复区间发现 18 条记录', '幂等入库 15 条，重复 3 条', '区间对账通过，无未覆盖游标']
+              : execution.purpose === '故障重试'
+                ? [...execution.logs, '新规则代表页面验证 5/5 通过', '按合并缺口范围发现 18 条记录', '幂等入库 15 条，重复 3 条', '范围对账通过，无未覆盖游标']
+                : isRetryAttempt
+                  ? [...execution.logs, `重新请求 ${attemptDiscovered} 个失败页面`, `成功入库 ${attemptArticles} 条`, '本次采集记录已在重试后完成']
+                  : [...execution.logs, '列表发现 5 条候选记录', '正文入库 3 条', '质量检查通过，执行完成']
           return {
             ...execution,
             status: '成功',
-            discovered: execution.purpose === '修复验证' ? 5 : 18,
-            articles: execution.purpose === '修复验证' ? 0 : ['缺口补采', '故障重试'].includes(execution.purpose) ? 15 : 3,
+            discovered: isRetryAttempt && !execution.purpose ? Math.max(execution.discovered || 0, (execution.articles || 0) + attemptDiscovered) : attemptDiscovered,
+            articles: isRetryAttempt && !execution.purpose ? (execution.articles || 0) + attemptArticles : attemptArticles,
             validationPassed: ['修复验证', '故障重试'].includes(execution.purpose) ? 5 : execution.validationPassed,
             validationTotal: ['修复验证', '故障重试'].includes(execution.purpose) ? 5 : execution.validationTotal,
             finishedAt: completedAt,
             duration: '0m02s',
             readyAt: null,
             reconciliation: ['缺口补采', '故障重试'].includes(execution.purpose) ? '区间对账通过，无未覆盖游标' : execution.reconciliation,
-            logs: execution.purpose === '修复验证'
-              ? [...execution.logs, '代表页面 5/5 通过', '原失败阶段通过，允许启动数据恢复']
-              : execution.purpose === '缺口补采'
-                ? [...execution.logs, '按恢复区间发现 18 条记录', '幂等入库 15 条，重复 3 条', '区间对账通过，无未覆盖游标']
-                : execution.purpose === '故障重试'
-                  ? [...execution.logs, '新规则代表页面验证 5/5 通过', '按合并缺口范围发现 18 条记录', '幂等入库 15 条，重复 3 条', '范围对账通过，无未覆盖游标']
-                : [...execution.logs, '列表发现 5 条候选记录', '正文入库 3 条', '质量检查通过，执行完成'],
+            logs: completedLogs,
+            attempts: attempts.map((attempt, index) => index === attempts.length - 1 ? {
+              ...attempt,
+              status: '成功',
+              finishedAt: completedAt,
+              duration: '0m02s',
+              discovered: attemptDiscovered,
+              articles: attemptArticles,
+              issue: '',
+              stage: '',
+              logs: completedLogs,
+            } : attempt),
           }
         }
         if (recoveryIdsToStart.has(execution.id)) {
@@ -1309,6 +1433,22 @@ export function PrototypeProvider({ children }) {
             resolvedAt: Date.now(),
             retryExecutionId: execution.id,
             reconciliation: '区间对账通过，无未覆盖游标',
+          })
+        })
+      }
+      if (retryAttemptExecutions.length) {
+        const retriedSites = new Set(retryAttemptExecutions.map((execution) => execution.site))
+        setSites((items) => items.map((site) => retriedSites.has(site.name) && !['已停用', '已暂停'].includes(site.status)
+          ? { ...site, status: '已完成', last: '刚刚' }
+          : site))
+        retryAttemptExecutions.forEach((execution) => {
+          updateFailureWorkflows(execution.failureIds || [], {
+            status: '已解决',
+            resolvedAt: Date.now(),
+            sourceExecutionId: execution.id,
+            sourceExecutionIds: [execution.id],
+            retryExecutionId: execution.id,
+            reconciliation: '同一采集记录内重试成功，失败尝试日志已保留',
           })
         })
       }
@@ -1483,6 +1623,7 @@ export function PrototypeProvider({ children }) {
     saveTask,
     createTask,
     saveUser,
+    retryExecution,
     runTask,
     saveCapabilityCandidate,
     runCapabilityRegression,

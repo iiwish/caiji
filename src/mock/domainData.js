@@ -72,12 +72,19 @@ export const initialUsers = [
 
 export const initialExecutions = [
   { id: 'EX-1487', taskId: 'TK-001', task: '中国政府采购日常增量', site: '中国政府采购网', url: 'https://www.ccgp.gov.cn/cggg/zygg/', ruleId: 'RP-0001', ruleVersion: 'v1.4.0', status: '成功', discovered: 3320, articles: 3204, finishedAt: '07-16 15:40', duration: '2m18s', issue: '', stage: '', retryOf: '', logs: ['15:37:42 执行开始', '15:37:45 列表发现 3,320 条', '15:39:56 正文入库 3,204 条', '15:40:00 质量检查通过'] },
-  { id: 'EX-1486', taskId: 'TK-002', task: '湖北公共资源增量', site: '湖北省公共资源交易中心', url: 'https://ggzy.hubei.gov.cn/notice/list', ruleId: 'RP-0002', ruleVersion: 'v1.1.0', status: '成功', discovered: 1904, articles: 1860, finishedAt: '07-16 15:30', duration: '1m52s', issue: '', stage: '', retryOf: '', logs: ['15:28:08 执行开始', '15:28:12 列表发现 1,904 条', '15:30:00 入库完成'] },
+  {
+    id: 'EX-1486', taskId: 'TK-002', task: '湖北公共资源增量', site: '湖北省公共资源交易中心', url: 'https://ggzy.hubei.gov.cn/notice/list', ruleId: 'RP-0002', ruleVersion: 'v1.1.0', status: '成功', originalStatus: '失败', retryCount: 1, discovered: 1904, articles: 1860, finishedAt: '07-16 15:30', duration: '1m52s', issue: '', stage: '', retryOf: '', logs: ['15:28:08 第 2 次尝试开始', '15:28:12 列表发现 1,904 条', '15:30:00 入库完成'],
+    attempts: [
+      { number: 1, status: '失败', startedAt: '07-16 15:25', finishedAt: '07-16 15:26', duration: '0m31s', ruleVersion: 'v1.1.0', discovered: 0, articles: 0, stage: '页面请求', issue: '列表页请求超时', logs: ['15:25:30 执行开始', '15:26:01 GET /notice/list 请求超时', '15:26:01 执行失败 ETIMEDOUT'] },
+      { number: 2, status: '成功', startedAt: '07-16 15:28', finishedAt: '07-16 15:30', duration: '1m52s', ruleVersion: 'v1.1.0', discovered: 1904, articles: 1860, stage: '', issue: '', logs: ['15:28:08 第 2 次尝试开始', '15:28:12 列表发现 1,904 条', '15:30:00 入库完成'] },
+    ],
+  },
   { id: 'EX-1485', taskId: 'TK-003', task: '全国公共资源历史回补', site: '全国公共资源交易平台', url: 'https://ggzy.gov.cn/', ruleId: 'RP-0001', ruleVersion: 'v1.4.0', status: '运行中', discovered: 13022, articles: 12480, finishedAt: '-', duration: '14m06s', issue: '', stage: '', retryOf: '', logs: ['15:10:00 执行开始', '15:23:40 已处理 13,022 个详情页', '15:24:06 正在执行质量检查'] },
   { id: 'EX-1484', taskId: 'TK-004', task: '广东监管公告增量', site: '广东省招标投标监管网', url: 'https://gdzbtb.gov.cn/notice/list', ruleId: 'RP-0003', ruleVersion: 'v2.0.1', status: '失败', discovered: 0, articles: 0, finishedAt: '07-16 14:50', duration: '0m12s', issue: '页面结构变化，列表定位失败', stage: '列表发现', retryOf: '', logs: ['14:50:00 执行开始', '14:50:09 GET /notice/list 200', '14:50:12 选择器 div.m_list div.item 匹配 0 个节点', '14:50:12 执行失败 PARSE_EMPTY'] },
   { id: 'EX-1483', taskId: 'TK-001', task: '中国政府采购日常增量', site: '中国政府采购网', url: 'https://www.ccgp.gov.cn/cggg/zygg/', ruleId: 'RP-0001', ruleVersion: 'v1.4.0', status: '部分失败', discovered: 690, articles: 642, finishedAt: '07-16 15:00', duration: '0m48s', issue: '48 个详情页请求超时', stage: '明细抓取', retryOf: '', logs: ['14:59:12 执行开始', '14:59:26 列表发现 690 条', '15:00:00 48 个详情页请求超时'] },
   { id: 'EX-1482', taskId: 'TK-004', task: '广东监管公告增量', site: '广东省招标投标监管网', url: 'https://gdzbtb.gov.cn/notice/list', ruleId: 'RP-0003', ruleVersion: 'v2.0.1', status: '失败', discovered: 0, articles: 0, finishedAt: '07-16 12:50', duration: '0m11s', issue: '页面结构变化，列表定位失败', stage: '列表发现', retryOf: '', logs: ['12:50:00 执行开始', '12:50:08 GET /notice/list 200', '12:50:11 列表选择器匹配 0 个节点', '12:50:11 执行失败 PARSE_EMPTY'] },
   { id: 'EX-1481', taskId: 'TK-004', task: '广东监管公告增量', site: '广东省招标投标监管网', url: 'https://gdzbtb.gov.cn/notice/list', ruleId: 'RP-0003', ruleVersion: 'v2.0.1', status: '失败', discovered: 0, articles: 0, finishedAt: '07-16 10:50', duration: '0m10s', issue: '页面结构变化，列表定位失败', stage: '列表发现', retryOf: '', logs: ['10:50:00 执行开始', '10:50:07 GET /notice/list 200', '10:50:10 列表选择器匹配 0 个节点', '10:50:10 执行失败 PARSE_EMPTY'] },
+  { id: 'EX-1480', taskId: 'TK-003', task: '全国公共资源历史回补', site: '全国公共资源交易平台', url: 'https://ggzy.gov.cn/jyxx/detail/8842.html', ruleId: 'RP-0001', ruleVersion: 'v1.4.0', status: '失败', discovered: 1, articles: 0, finishedAt: '07-16 14:47', duration: '0m30s', issue: '详情页请求超时', stage: '明细抓取', retryOf: '', logs: ['14:46:33 执行开始', '14:47:03 GET /jyxx/detail/8842.html 请求超时', '14:47:03 执行失败 ETIMEDOUT'] },
 ]
 
 export const initialArticles = [
@@ -98,7 +105,7 @@ export const initialIntakeBatches = [
     urls: [
       { id: 'URL-01', site: '湖北省公共资源交易中心', url: 'https://ggzy.hubei.gov.cn/notice/list', source: '输入', judgment: '已归属', confidence: 96, ruleId: 'RP-0002', samples: 5, status: '待审核', issue: '' },
       { id: 'URL-02', site: '江苏省政府采购网', url: 'https://ccgp-jiangsu.gov.cn/notice/list', source: '输入', judgment: '可确认', confidence: 88, ruleId: 'RP-0004', samples: 5, status: '待确认归属', issue: '' },
-      { id: 'URL-03', site: '江苏省政府采购网', url: 'https://ccgp-jiangsu.gov.cn/notice/result', source: '自动发现', judgment: '已归属', confidence: 91, ruleId: 'RP-0004', samples: 0, status: '验证失败', issue: '列表定位失败' },
+      { id: 'URL-03', site: '江苏省政府采购网', url: 'https://ccgp-jiangsu.gov.cn/notice/result', source: '自动发现', judgment: '识别中断', confidence: 0, ruleId: 'RP-0004', samples: 0, status: '分析失败', issue: '页面读取连续 3 次超时', failedStage: '加载 URL 页面', failureCode: 'PAGE_FETCH_TIMEOUT', analysisAttempt: 1 },
     ],
   },
   {

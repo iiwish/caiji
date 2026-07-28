@@ -3,6 +3,7 @@ import { MoreOutlined, RightOutlined, SearchOutlined } from '@ant-design/icons'
 
 const statusPalette = {
   成功: ['#e6f6ef', '#0f8a52'],
+  '成功（重试后）': ['#e6f6ef', '#0f8a52'],
   健康: ['#e6f6ef', '#0f8a52'],
   可采集: ['#e6f6ef', '#0f8a52'],
   回归通过: ['#e6f6ef', '#0f8a52'],
@@ -30,11 +31,13 @@ const statusPalette = {
   待配置: ['#fbf0dd', '#b06a04'],
   '待人工确认': ['#fbf0dd', '#b06a04'],
   部分失败: ['#fbf0dd', '#b06a04'],
+  部分成功: ['#fbf0dd', '#b06a04'],
   '失败 · 待处理': ['#fdecef', '#cf3350'],
   '部分成功 · 待处理': ['#fbf0dd', '#b06a04'],
   需处理: ['#fdecef', '#cf3350'],
   需修复: ['#fdecef', '#cf3350'],
   失败: ['#fdecef', '#cf3350'],
+  分析失败: ['#fdecef', '#cf3350'],
   验证失败: ['#fdecef', '#cf3350'],
   规则异常: ['#fdecef', '#cf3350'],
   '列表 0 行': ['#fdecef', '#cf3350'],
@@ -45,6 +48,7 @@ const statusPalette = {
   候选版本中: ['#f3ecfd', '#7c3aed'],
   草稿: ['#eef0f3', '#6b7688'],
   已暂停: ['#eef0f3', '#6b7688'],
+  已停止: ['#eef0f3', '#6b7688'],
   已停用: ['#eef0f3', '#6b7688'],
 }
 

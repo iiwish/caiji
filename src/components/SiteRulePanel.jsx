@@ -82,7 +82,7 @@ export function SiteRulePanel({ site, rule, standalone = false, onOpenPlan }) {
       message.warning('请先发布可用规则并恢复采集计划')
       return
     }
-    message.success(`已创建重跑执行 ${executionId}`)
+    message.success(`采集记录 ${executionId} 已开始新的执行尝试`)
     navigate(`/executions/${executionId}`)
   }
 

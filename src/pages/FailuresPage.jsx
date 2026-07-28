@@ -191,7 +191,7 @@ export function FailuresPage() {
   const { message } = AntApp.useApp()
   const navigate = useNavigate()
   const { search } = useOutletContext()
-  const { sites, rules, tasks, executions, intakeBatches, failureWorkflows, startSiteAnalysis } = usePrototype()
+  const { sites, rules, tasks, executions, intakeBatches, failureWorkflows, retryExecution, startSiteAnalysis, updateFailureWorkflows } = usePrototype()
   const [handlingScope, setHandlingScope] = useState('全部')
   const [errorCategory, setErrorCategory] = useState()
   const [retryingIds, setRetryingIds] = useState([])
@@ -241,8 +241,14 @@ export function FailuresPage() {
     const site = sites.find((item) => item.name === incident.site)
     const rule = rules.find((item) => item.site === incident.site || (site && item.siteHost === site.host))
     const relatedTasks = tasks.filter((task) => task.site === incident.site || task.ruleId === rule?.id)
+    const workflow = failureWorkflows[incident.id]
+    const workflowExecutionIds = new Set([...(workflow?.sourceExecutionIds || []), workflow?.sourceExecutionId].filter(Boolean))
+    const incidentPages = incident.pages.map((page) => String(page || '').replace(/^https?:\/\/[^/]+/i, ''))
     const sourceExecutions = executions.filter((execution) => {
+      if (workflowExecutionIds.has(execution.id)) return true
       if (execution.site !== incident.site || !['失败', '部分失败'].includes(execution.status)) return false
+      const executionPath = String(execution.url || '').replace(/^https?:\/\/[^/]+/i, '')
+      if (incidentPages.some((page) => page && executionPath === page)) return true
       if (rule?.id && execution.ruleId && execution.ruleId !== rule.id) return false
       const failureText = `${execution.stage || ''}${execution.issue || ''}`
       if (incident.diagnosis.kind === 'rule') return /结构|列表|定位|选择器|解析|字段/.test(failureText)
@@ -253,14 +259,31 @@ export function FailuresPage() {
   }
 
   const queueRetry = (rows) => {
-    const newIds = rows.map((incident) => incident.id).filter((id) => !retryingIds.includes(id))
+    const retryableRows = rows.filter((incident) => !retryingIds.includes(incident.id))
+    const submitted = retryableRows.flatMap((incident) => {
+      const { sourceExecutions } = getIncidentContext(incident)
+      const executionIds = sourceExecutions
+        .map((execution) => retryExecution(execution.id, { failureIds: [incident.id] }))
+        .filter(Boolean)
+      if (executionIds.length) {
+        updateFailureWorkflows(incident.id, {
+          status: '重试中',
+          sourceExecutionId: executionIds[0],
+          sourceExecutionIds: executionIds,
+          retryExecutionId: executionIds[0],
+        })
+      }
+      return executionIds.length ? [incident.id] : []
+    })
+    const newIds = [...new Set(submitted)]
     if (!newIds.length) {
-      message.info('所选故障已经在重试中')
+      if (retryableRows.length) message.warning('未找到可重试的采集记录，请先检查关联采集计划')
+      else message.info('所选故障已经在重试中')
       return
     }
     setRetryingIds((current) => [...new Set([...current, ...newIds])])
     setSelectedIds((current) => current.filter((id) => !newIds.includes(id)))
-    message.success(`已提交 ${newIds.length} 个故障重试任务`)
+    message.success(`已为 ${newIds.length} 个故障追加执行尝试，未新增采集记录`)
   }
 
   const openCollectionConfig = (incident) => {
@@ -626,7 +649,7 @@ export function FailuresPage() {
                     : activeIncident.workflow?.status === '待修复规则'
                       ? '完成规则订正和自动回归，确认范围后发布规则并重试'
                       : retryingIds.includes(activeIncident.id)
-                ? '正在重试失败页面并验证结果'
+                ? '正在同一采集记录中执行下一次尝试，不会新增重复记录'
                 : analysisQueuedIds.includes(activeIncident.id)
                   ? '正在分析错误原因并生成处理建议'
                   : activeIncident.handling.nextAction}</small>
@@ -642,7 +665,7 @@ export function FailuresPage() {
               <div><span>故障影响页面</span><strong className="mono">{activeIncident.impact}</strong></div>
               <div><span>失败执行</span><strong className="mono">{activeContext.sourceExecutions.length}</strong></div>
               <div><span>规则版本</span><strong className="mono">{activeContext.rule?.version || '-'}</strong></div>
-              <div><span>原执行重试</span><strong className="mono">{activeIncident.retries}</strong></div>
+              <div><span>执行尝试</span><strong className="mono">{activeIncident.retries}</strong></div>
             </section>
 
             {activeIncident.workflow?.recoveryPlan && (

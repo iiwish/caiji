@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, App as AntApp, Button, Empty, Form, Input, Modal, Pagination, Progress, Segmented, Select, Table, Tooltip, Upload } from 'antd'
 import {
   ArrowLeftOutlined,
@@ -8,6 +8,7 @@ import {
   CloseOutlined,
   CodeOutlined,
   CopyOutlined,
+  DownOutlined,
   EditOutlined,
   ExpandAltOutlined,
   HistoryOutlined,
@@ -19,6 +20,8 @@ import {
   RobotOutlined,
   RocketOutlined,
   StopOutlined,
+  UpOutlined,
+  WarningOutlined,
 } from '@ant-design/icons'
 import { useLocation, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
 import Papa from 'papaparse'
@@ -36,6 +39,7 @@ const hubeiSamples = [
   '智慧交通信号控制系统升级改造项目招标',
 ]
 const QUEUE_PAGE_SIZE = 20
+const ANALYSIS_STEPS = ['加载 URL 页面', '识别列表容器', '推断字段选择器', '试采集与校验', '生成采集配置']
 
 const analysisProfiles = {
   'ggzy.hubei.gov.cn': {
@@ -217,6 +221,92 @@ function validateGeneratedConfig(configText) {
   return { passed: true, passedCount: 20, total: 20, reason: '结构、字段与质量门禁全部通过' }
 }
 
+function buildAgentLogs(entry) {
+  const attempt = entry.analysisAttempt || 1
+  const common = [
+    { time: '14:32:01', level: 'success', agent: 'Orchestrator', stage: '任务初始化', message: `分析尝试 #${attempt} 已启动，加载 HTML 列表与正文提取能力` },
+    { time: '14:32:02', level: 'success', agent: 'Fetch Agent', stage: '加载 URL 页面', message: `GET ${entry.url} · 200 · 184 KB` },
+    { time: '14:32:04', level: 'success', agent: 'Structure Agent', stage: '识别列表容器', message: '从 12 个候选节点中识别出列表容器，置信度 0.93' },
+    { time: '14:32:07', level: 'active', agent: 'Field Agent', stage: '推断字段选择器', message: '正在比较 5 个页面样本的标题、链接和发布时间字段' },
+  ]
+
+  if (entry.status === '分析中') return common
+  if (entry.status === '分析失败') {
+    return [
+      common[0],
+      { time: '14:32:03', level: 'warning', agent: 'Fetch Agent', stage: entry.failedStage || '加载 URL 页面', message: '页面响应超过 30 秒，正在执行第 3 次重试' },
+      { time: '14:33:34', level: 'error', agent: 'Fetch Agent', stage: entry.failedStage || '加载 URL 页面', message: `${entry.failureCode || 'PAGE_FETCH_TIMEOUT'} · ${entry.issue || '页面读取连续 3 次超时'}` },
+    ]
+  }
+  if (entry.status === '已停止') {
+    return [
+      ...common.slice(0, 3),
+      { time: entry.stoppedAt || '14:32:08', level: 'stopped', agent: 'Orchestrator', stage: entry.failedStage || '推断字段选择器', message: '收到人工停止指令，已中止当前尝试并保留已产生的日志' },
+    ]
+  }
+
+  const completed = [
+    ...common.slice(0, 3),
+    { time: '14:32:09', level: 'success', agent: 'Field Agent', stage: '推断字段选择器', message: '已生成 4 个字段选择器，并保留原始数据字段' },
+    { time: '14:32:12', level: 'success', agent: 'Validation Agent', stage: '试采集与校验', message: '完成 20 个样本的结构、字段和质量门禁检查' },
+  ]
+  if (entry.status === '验证失败') {
+    return [...completed, { time: '14:32:13', level: 'warning', agent: 'Validation Agent', stage: '试采集与校验', message: `VALIDATION_FAILED · ${entry.issue || '部分样本未通过自动回归'}` }]
+  }
+  return [...completed, { time: '14:32:14', level: 'success', agent: 'Config Agent', stage: '生成采集配置', message: '采集配置已生成，等待人工审核' }]
+}
+
+function AgentExecutionLog({ entry, expanded, onToggle }) {
+  const logs = buildAgentLogs(entry)
+  const lastLog = logs.at(-1)
+  const isLive = entry.status === '分析中'
+  const isFailed = entry.status === '分析失败'
+  const levelLabels = { success: 'DONE', active: 'RUN', warning: 'WARN', error: 'ERROR', stopped: 'STOP' }
+
+  return (
+    <section className={`analysis-surface ai-agent-log-card${isFailed ? ' failed' : ''}`}>
+      <header className="ai-agent-log-header">
+        <div className="ai-agent-log-title">
+          <RobotOutlined />
+          <h2>Agent 执行日志</h2>
+          {isLive && <span className="ai-live-indicator"><i />实时</span>}
+          {isFailed && <StatusTag value="分析失败" />}
+        </div>
+        <div className="ai-agent-log-actions">
+          <span className="mono">尝试 #{entry.analysisAttempt || 1} · {logs.length} 条</span>
+          <Button
+            type="text"
+            size="small"
+            icon={expanded ? <UpOutlined /> : <DownOutlined />}
+            aria-expanded={expanded}
+            onClick={onToggle}
+          >{expanded ? '收起' : '展开'}</Button>
+        </div>
+      </header>
+      {expanded ? (
+        <div className="ai-agent-log-stream" aria-live={isLive ? 'polite' : 'off'}>
+          {logs.map((log, index) => (
+            <div className={`ai-agent-log-row ${log.level}`} key={`${log.time}-${log.agent}-${index}`}>
+              <time className="mono">{log.time}</time>
+              <span className={`ai-agent-log-level ${log.level}`}>{levelLabels[log.level]}</span>
+              <strong>{log.agent}</strong>
+              <span className="ai-agent-log-stage">{log.stage}</span>
+              <p className="mono">{log.message}</p>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <button className="ai-agent-log-summary" type="button" onClick={onToggle}>
+          <span className={`ai-agent-log-level ${lastLog.level}`}>{levelLabels[lastLog.level]}</span>
+          <strong>{lastLog.stage}</strong>
+          <span className="mono">{lastLog.message}</span>
+          <DownOutlined />
+        </button>
+      )}
+    </section>
+  )
+}
+
 export function AiAnalysisPage() {
   const { message, modal } = AntApp.useApp()
   const navigate = useNavigate()
@@ -261,6 +351,8 @@ export function AiAnalysisPage() {
   const [repairPrompt, setRepairPrompt] = useState('')
   const [workingUrlId, setWorkingUrlId] = useState('')
   const [handoffEntryId, setHandoffEntryId] = useState('')
+  const [agentLogExpanded, setAgentLogExpanded] = useState(false)
+  const analysisTimersRef = useRef(new Map())
   const [createForm] = Form.useForm()
 
   const allEntries = useMemo(() => intakeBatches.flatMap((batch) => batch.urls.map((url, urlIndex) => ({
@@ -365,6 +457,8 @@ export function AiAnalysisPage() {
   const baseConfigText = profile ? JSON.stringify(profile.config, null, 2) : ''
   const configText = selected ? (configDrafts[selected.id] || selected.approvedConfig || baseConfigText) : ''
   const isQueued = selected?.status === '排队中'
+  const isAnalysisFailed = selected?.status === '分析失败'
+  const isStopped = selected?.status === '已停止'
   const confidence = ['排队中', '分析中'].includes(selected?.status) ? 0 : profile?.confidence || 0
   const isAnalyzing = selected?.status === '分析中' || workingUrlId === selected?.id
   const isRestarting = workingUrlId === selected?.id
@@ -398,6 +492,10 @@ export function AiAnalysisPage() {
   const followingTasks = matchingTasks.filter((task) => task.versionPolicy === '跟随最新发布')
   const automaticRegression = selected ? validateGeneratedConfig(configText) : { passed: false, passedCount: 0, total: 20, reason: '' }
 
+  useEffect(() => {
+    setAgentLogExpanded(['分析中', '分析失败', '已停止'].includes(selected?.status))
+  }, [selected?.id, selected?.status])
+
   const paramsForEntry = (entry) => {
     const nextParams = new URLSearchParams({ entry: entry.id, site: getHost(entry.url) })
     if (entry.analysisKind) nextParams.set('mode', entry.analysisKind)
@@ -417,9 +515,24 @@ export function AiAnalysisPage() {
   const updateSelected = (patch) => updateBatchUrl(selected.batchId, selected.id, patch)
 
   const runAnalysis = (prompt = '', nextConfigText = configText) => {
+    const existingTimerId = analysisTimersRef.current.get(selected.id)
+    if (existingTimerId) window.clearTimeout(existingTimerId)
+    const nextAttempt = (selected.analysisAttempt || 1) + 1
     setWorkingUrlId(selected.id)
-    updateSelected({ status: '分析中', issue: '', releasePhase: '', releaseVersion: '', releaseError: '' })
-    window.setTimeout(() => {
+    setAgentLogExpanded(true)
+    updateSelected({
+      status: '分析中',
+      issue: '',
+      releasePhase: '',
+      releaseVersion: '',
+      releaseError: '',
+      failedStage: '',
+      failureCode: '',
+      stoppedAt: '',
+      analysisAttempt: nextAttempt,
+      startedAt: Date.now(),
+    })
+    const timerId = window.setTimeout(() => {
       const validation = validateGeneratedConfig(nextConfigText)
       updateBatchUrl(selected.batchId, selected.id, {
         status: validation.passed ? '待审核' : '验证失败',
@@ -430,11 +543,46 @@ export function AiAnalysisPage() {
         aiRegression: validation.passed ? 'passed' : 'failed',
         regressionPassed: validation.passedCount,
         regressionTotal: validation.total,
+        failedStage: validation.passed ? '' : '试采集与校验',
+        failureCode: validation.passed ? '' : 'VALIDATION_FAILED',
+        completedAt: new Date().toISOString(),
       })
+      analysisTimersRef.current.delete(selected.id)
       setWorkingUrlId('')
       if (validation.passed) message.success(prompt ? '二次分析及自动回归完成，请审核发布' : '重新分析及自动回归完成，请审核发布')
       else message.error(`自动回归未通过：${validation.reason}`)
-    }, 900)
+    }, 5000)
+    analysisTimersRef.current.set(selected.id, timerId)
+  }
+
+  const stopRunningAnalysis = () => {
+    modal.confirm({
+      title: '停止当前 AI 分析？',
+      width: 500,
+      okText: '停止分析',
+      cancelText: '继续运行',
+      okButtonProps: { danger: true },
+      content: '停止后会保留当前尝试已经产生的 Agent 日志和停止阶段。任务仍留在当前队列，可随时重新分析。',
+      onOk: () => {
+        const timerId = analysisTimersRef.current.get(selected.id)
+        if (timerId) window.clearTimeout(timerId)
+        analysisTimersRef.current.delete(selected.id)
+        const stoppedAt = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+        setWorkingUrlId('')
+        setAgentLogExpanded(true)
+        updateSelected({
+          status: '已停止',
+          judgment: '待重新分析',
+          issue: '用户主动停止分析',
+          failedStage: '推断字段选择器',
+          failureCode: 'USER_STOPPED',
+          stoppedAt,
+          readyAt: null,
+          completedAt: new Date().toISOString(),
+        })
+        message.success('分析已停止，当前日志已保留')
+      },
+    })
   }
 
   const completeApproval = () => {
@@ -458,14 +606,18 @@ export function AiAnalysisPage() {
       okText: '发布规则并重试',
       cancelText: '继续检查',
       content: <div className="ai-recovery-confirm">
-        <p>新规则发布后，系统只创建一条故障重试记录；全部原失败执行继续保留“失败”事实。</p>
+        <p>{selectedSourceExecutionIds.length === 1
+          ? '新规则发布后，系统在原采集记录中追加一次执行尝试，不新增采集记录。'
+          : `新规则发布后，系统为 ${selectedSourceExecutionIds.length} 条来源记录只创建一条合并故障重试记录。`}</p>
         <dl>
           <div><dt>预计起点</dt><dd>{recoveryPreview.start}</dd></div>
           <div><dt>预计终点</dt><dd>{recoveryPreview.end}</dd></div>
           <div><dt>来源范围</dt><dd>{recoveryPreview.source}</dd></div>
           <div><dt>区间口径</dt><dd>{recoveryPreview.boundary}</dd></div>
         </dl>
-        <small>规则验证、缺口采集和范围对账是同一次故障重试的内部阶段，不会拆成多条采集记录。</small>
+        <small>{selectedSourceExecutionIds.length === 1
+          ? '采集记录 ID 和恢复范围保持不变；新尝试使用新规则，前序失败尝试继续保留。'
+          : '规则验证、缺口采集和范围对账是同一次合并恢复的内部阶段，不会拆成多条采集记录。'}</small>
       </div>,
       onOk: completeApproval,
     })
@@ -537,7 +689,7 @@ export function AiAnalysisPage() {
         message.warning('未找到可重跑的失败任务，请前往采集管理检查计划状态')
         return
       }
-      message.success(`已创建重跑执行 ${executionId}`)
+      message.success(`采集记录 ${executionId} 已开始新的执行尝试`)
       navigate(`/executions/${executionId}`)
       return
     }
@@ -911,6 +1063,10 @@ export function AiAnalysisPage() {
       : '查看采集计划'
   const reviewBlockedReason = selected.status === '分析中'
     ? 'AI 分析尚未完成'
+    : isAnalysisFailed
+      ? 'AI 分析失败，请查看日志并重新分析'
+    : isStopped
+      ? '当前分析已停止，请重新分析后再审核'
     : editingConfig
       ? '请先保存或取消当前订正'
       : !automaticRegression.passed
@@ -977,7 +1133,15 @@ export function AiAnalysisPage() {
                     <span className="ai-analysis-item-top"><strong>{entry.site}</strong><StatusTag value={displayStatus(entry.status)} /></span>
                     <span className="ai-analysis-item-entry">
                       <span className="mono ai-analysis-item-url" title={`${entry.id} · ${entry.url}`}>{entry.url}</span>
-                      <span className="mono ai-analysis-item-confidence" title="任务进度">{entry.status === '排队中' ? '等待调度' : entry.status === '分析中' ? '解析中' : `${entry.confidence || buildProfile(entry).confidence}%`}</span>
+                      <span className="mono ai-analysis-item-confidence" title="任务进度">{entry.status === '排队中'
+                        ? '等待调度'
+                        : entry.status === '分析中'
+                          ? '解析中'
+                          : entry.status === '分析失败'
+                            ? '查看日志'
+                            : entry.status === '已停止'
+                              ? '已停止'
+                              : `${entry.confidence || buildProfile(entry).confidence}%`}</span>
                     </span>
                   </button>
                 ))}
@@ -1049,9 +1213,11 @@ export function AiAnalysisPage() {
               <Button type="primary" icon={<ReloadOutlined />} onClick={restartHistoricalAnalysis}>重新分析</Button>
             ) : isQueued ? (
               <Button danger icon={<StopOutlined />} onClick={cancelSelectedTask}>取消任务</Button>
+            ) : isAnalyzing ? (
+              <Button danger icon={<StopOutlined />} onClick={stopRunningAnalysis}>停止分析</Button>
             ) : (
               <>
-                <Button icon={<ReloadOutlined />} disabled={isRestarting} onClick={() => runAnalysis()}>{selected.status === '分析中' ? '重新开始分析' : '重新分析'}</Button>
+                <Button icon={<ReloadOutlined />} disabled={isRestarting} onClick={() => runAnalysis()}>重新分析</Button>
                 <Button type="primary" icon={<CheckOutlined />} title={reviewBlockedReason} disabled={Boolean(reviewBlockedReason)} onClick={approveSelected}>{selected.status === '待确认归属' ? '确认规则' : reviewBlockedReason ? (isFailureRepair ? '暂不可重试' : '暂不可审核') : (isFailureRepair ? '发布规则并重试' : '审核通过')}</Button>
               </>
             )}
@@ -1096,7 +1262,7 @@ export function AiAnalysisPage() {
           />
         )}
 
-        {!isHistorical && !isAnalyzing && (
+        {!isHistorical && !isQueued && !isAnalyzing && !isAnalysisFailed && !isStopped && (
           <Alert
             className="ai-flow-context ai-auto-regression"
             type={automaticRegression.passed ? 'success' : 'error'}
@@ -1123,19 +1289,58 @@ export function AiAnalysisPage() {
               </div>
             </div>
           </section>
-        ) : isAnalyzing ? (
-          <section className="analysis-surface ai-pipeline-card">
-            <header className="ai-section-header">
-              <div><RobotOutlined /><h2>AI 分析流水线</h2><StatusTag value="分析中" /></div>
-              <span className="mono">3 / 5 样本页面已加载</span>
-            </header>
-            <Progress percent={62} showInfo={false} />
-            <div className="ai-pipeline-steps">
-              {['加载入口页面', '识别列表容器', '推断字段选择器', '试采集与校验', '生成采集配置'].map((step, index) => <div className={index < 2 ? 'done' : index === 2 ? 'active' : ''} key={step}><span>{index < 2 ? <CheckOutlined /> : index + 1}</span><strong>{step}</strong></div>)}
-            </div>
-          </section>
         ) : (
           <>
+            {isAnalyzing && (
+              <section className="analysis-surface ai-pipeline-card">
+                <header className="ai-section-header">
+                  <div><RobotOutlined /><h2>AI 分析流水线</h2><StatusTag value="分析中" /></div>
+                  <span className="mono">3 / 5 样本页面已加载</span>
+                </header>
+                <Progress percent={62} showInfo={false} />
+                <div className="ai-pipeline-steps">
+                  {ANALYSIS_STEPS.map((step, index) => <div className={index < 2 ? 'done' : index === 2 ? 'active' : ''} key={step}><span>{index < 2 ? <CheckOutlined /> : index + 1}</span><strong>{step}</strong></div>)}
+                </div>
+              </section>
+            )}
+
+            {isAnalysisFailed && (
+              <section className="analysis-surface ai-analysis-outcome failed">
+                <span className="ai-analysis-outcome-icon"><WarningOutlined /></span>
+                <div className="ai-analysis-outcome-copy">
+                  <span>AI 分析失败 · 尝试 #{selected.analysisAttempt || 1}</span>
+                  <h2>{selected.failedStage || '加载 URL 页面'}未完成</h2>
+                  <p>{selected.issue || '页面读取连续 3 次超时，系统已停止本次分析。'}</p>
+                </div>
+                <dl>
+                  <div><dt>失败阶段</dt><dd>{selected.failedStage || '加载 URL 页面'}</dd></div>
+                  <div><dt>错误码</dt><dd className="mono">{selected.failureCode || 'PAGE_FETCH_TIMEOUT'}</dd></div>
+                  <div><dt>处理建议</dt><dd>检查 URL 可访问性后重新分析</dd></div>
+                </dl>
+                <p className="ai-analysis-outcome-note">详情页会保留失败前的全部日志；重新分析会开始新的尝试，不覆盖本次失败记录。</p>
+              </section>
+            )}
+
+            {isStopped && (
+              <section className="analysis-surface ai-analysis-outcome stopped">
+                <span className="ai-analysis-outcome-icon"><StopOutlined /></span>
+                <div className="ai-analysis-outcome-copy">
+                  <span>本次分析已停止 · 尝试 #{selected.analysisAttempt || 1}</span>
+                  <h2>日志与执行阶段已保留</h2>
+                  <p>任务仍在当前队列中，确认原因后可从详情页重新分析。</p>
+                </div>
+                <dl>
+                  <div><dt>停止阶段</dt><dd>{selected.failedStage || '推断字段选择器'}</dd></div>
+                  <div><dt>停止时间</dt><dd className="mono">{selected.stoppedAt || '—'}</dd></div>
+                  <div><dt>执行结果</dt><dd>未生成可审核配置</dd></div>
+                </dl>
+              </section>
+            )}
+
+            <AgentExecutionLog entry={selected} expanded={agentLogExpanded} onToggle={() => setAgentLogExpanded((value) => !value)} />
+
+            {!isAnalyzing && !isAnalysisFailed && !isStopped && (
+              <>
             <section className="analysis-surface ai-fields-card">
               <header className="ai-section-header">
                 <div><h2>识别字段</h2><span className="ai-section-count mono">{profile.fields.length}</span></div>
@@ -1186,6 +1391,8 @@ export function AiAnalysisPage() {
                 <Input.TextArea rows={3} value={repairPrompt} onChange={(event) => setRepairPrompt(event.target.value)} placeholder="例如：列表容器应为 div.m_list，请重新定位「采购单位」字段…" />
                 <div className="ai-correction-footer"><span>AI 将结合你的提示重新解析页面结构并生成新代码</span><Button className="ai-submit-analysis" type="primary" icon={<CaretRightOutlined />} onClick={submitCorrection}>提交二次分析</Button></div>
               </section>
+            )}
+              </>
             )}
           </>
         )}
