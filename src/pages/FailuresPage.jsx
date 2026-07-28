@@ -3,6 +3,7 @@ import { Alert, App as AntApp, Button, Modal, Segmented, Select, Table, Tag, Too
 import {
   CloseOutlined,
   GlobalOutlined,
+  HistoryOutlined,
   ReloadOutlined,
   RobotOutlined,
   SettingOutlined,
@@ -174,6 +175,7 @@ function absolutePageUrl(page, context) {
 
 function workflowTone(status, fallback) {
   if (status === '已解决') return 'resolved'
+  if (status === '重试中') return 'recovering'
   if (status === '验证中') return 'validating'
   if (status === '补采中') return 'recovering'
   if (['诊断中', '待修复规则'].includes(status)) return 'analyzing'
@@ -197,6 +199,7 @@ export function FailuresPage() {
   const [selectedIds, setSelectedIds] = useState([])
   const [selectedIncident, setSelectedIncident] = useState(null)
   const [batchFeedback, setBatchFeedback] = useState(null)
+  const [showHistory, setShowHistory] = useState(false)
 
   const baseIncidents = useMemo(() => buildIncidents(failureRows), [])
   const incidents = useMemo(() => {
@@ -211,14 +214,19 @@ export function FailuresPage() {
       return { ...incident, workflow: { ...workflow, status } }
     })
   }, [baseIncidents, failureWorkflows, intakeBatches])
-  const visibleIncidents = useMemo(() => incidents.filter((incident) => {
+  const scopedIncidents = useMemo(() => incidents.filter((incident) => (
+    showHistory
+      ? incident.workflow?.status === '已解决'
+      : incident.workflow?.status !== '已解决'
+  )), [incidents, showHistory])
+  const visibleIncidents = useMemo(() => scopedIncidents.filter((incident) => {
     const matchesHandling = handlingScope === '全部'
       || (handlingScope === '自动处理' && incident.handling.mode === 'retry')
       || (handlingScope === '人工处理' && incident.handling.mode === 'diagnose')
     const matchesCategory = !errorCategory || incident.err === errorCategory
     const matchesSearch = `${incident.site}${incident.pages.join('')}${incident.err}${incident.msg}${incident.code}`.toLowerCase().includes(search.trim().toLowerCase())
     return matchesHandling && matchesCategory && matchesSearch
-  }), [errorCategory, handlingScope, incidents, search])
+  }), [errorCategory, handlingScope, scopedIncidents, search])
 
   useEffect(() => {
     const visibleIds = new Set(visibleIncidents.map((incident) => incident.id))
@@ -233,7 +241,14 @@ export function FailuresPage() {
     const site = sites.find((item) => item.name === incident.site)
     const rule = rules.find((item) => item.site === incident.site || (site && item.siteHost === site.host))
     const relatedTasks = tasks.filter((task) => task.site === incident.site || task.ruleId === rule?.id)
-    const sourceExecutions = executions.filter((execution) => execution.site === incident.site && ['失败', '部分失败'].includes(execution.status))
+    const sourceExecutions = executions.filter((execution) => {
+      if (execution.site !== incident.site || !['失败', '部分失败'].includes(execution.status)) return false
+      if (rule?.id && execution.ruleId && execution.ruleId !== rule.id) return false
+      const failureText = `${execution.stage || ''}${execution.issue || ''}`
+      if (incident.diagnosis.kind === 'rule') return /结构|列表|定位|选择器|解析|字段/.test(failureText)
+      if (incident.diagnosis.kind === 'access') return /登录|验证码|封禁|访问|身份/.test(failureText)
+      return /超时|HTTP|网络|服务/.test(failureText)
+    })
     return { site, rule, relatedTasks, sourceExecution: sourceExecutions[0], sourceExecutions }
   }
 
@@ -313,10 +328,11 @@ export function FailuresPage() {
   const openWorkflow = (incident) => {
     const workflow = incident.workflow
     if (!workflow) return
-    if (['验证中', '补采中', '已解决'].includes(workflow.status)) {
-      const executionId = workflow.status === '验证中'
-        ? workflow.validationExecutionId
-        : workflow.recoveryExecutionId || workflow.validationExecutionId
+    if (['重试中', '验证中', '补采中', '已解决'].includes(workflow.status)) {
+      const executionId = workflow.retryExecutionId
+        || (workflow.status === '验证中'
+          ? workflow.validationExecutionId
+          : workflow.recoveryExecutionId || workflow.validationExecutionId)
       if (executionId) navigate(`/executions/${executionId}`)
       return
     }
@@ -392,7 +408,7 @@ export function FailuresPage() {
         const workflowStatus = incident.workflow?.status
         const workflowPrimary = workflowStatus
           ? {
-              label: workflowStatus === '已解决' ? '查看结果' : workflowStatus === '补采中' ? '查看恢复' : workflowStatus === '验证中' ? '查看验证' : '查看诊断',
+              label: workflowStatus === '已解决' ? '查看结果' : workflowStatus === '重试中' ? '查看重试' : workflowStatus === '补采中' ? '查看恢复' : workflowStatus === '验证中' ? '查看验证' : '查看诊断',
               onClick: () => workflowStatus === '已解决' ? setSelectedIncident(incident) : openWorkflow(incident),
             }
           : null
@@ -419,13 +435,18 @@ export function FailuresPage() {
     ? incidents.find((incident) => incident.id === selectedIncident.id) || selectedIncident
     : null
   const activeContext = getIncidentContext(activeIncident)
-  const activeRecoveryExecution = executions.find((execution) => execution.id === activeIncident?.workflow?.recoveryExecutionId)
+  const activeRetryExecution = executions.find((execution) => execution.id === (
+    activeIncident?.workflow?.retryExecutionId
+      || activeIncident?.workflow?.recoveryExecutionId
+      || activeIncident?.workflow?.validationExecutionId
+  ))
   const selectedIncidents = incidents.filter((incident) => selectedIds.includes(incident.id))
   const retryTargets = selectedIncidents.filter((incident) => incident.handling.mode === 'retry' && !incident.workflow && !retryingIds.includes(incident.id))
   const diagnosisTargets = selectedIncidents.filter((incident) => !incident.workflow && !analysisQueuedIds.includes(incident.id))
   const openIncidents = incidents.filter((incident) => incident.workflow?.status !== '已解决')
   const retryFirstIncidents = openIncidents.filter((incident) => incident.handling.mode === 'retry')
   const diagnoseFirstIncidents = openIncidents.filter((incident) => incident.handling.mode === 'diagnose')
+  const resolvedIncidents = incidents.filter((incident) => incident.workflow?.status === '已解决')
   const failureStats = [
     { label: '当前故障', value: openIncidents.length, meta: `影响 ${openIncidents.reduce((sum, incident) => sum + incident.impact, 0)} 个页面`, tone: 'red' },
     { label: '自动处理', value: retryFirstIncidents.length, meta: `影响 ${retryFirstIncidents.reduce((sum, incident) => sum + incident.impact, 0)} 个页面`, tone: 'blue' },
@@ -435,7 +456,7 @@ export function FailuresPage() {
 
   return (
     <div className="page-content failures-page">
-      <div className="failure-stat-grid">
+      {!showHistory && <div className="failure-stat-grid">
         {failureStats.map((stat) => (
           <section className="failure-stat-card" key={stat.label}>
             <div><i className={stat.tone} /><span>{stat.label}</span></div>
@@ -443,11 +464,22 @@ export function FailuresPage() {
             <small>{stat.meta}</small>
           </section>
         ))}
-      </div>
+      </div>}
+
+      {showHistory && (
+        <Alert
+          className="failure-history-alert"
+          type="info"
+          showIcon
+          icon={<HistoryOutlined />}
+          title="故障历史"
+          description="这里仅保留已经完成处置的聚合故障；日常失败队列只展示仍需处理或正在处理的问题。"
+        />
+      )}
 
       <div className="failure-toolbar">
         <div className="failure-toolbar-filters">
-          <Segmented
+          {!showHistory && <Segmented
             className="failure-filter"
             value={handlingScope}
             onChange={setHandlingScope}
@@ -459,7 +491,7 @@ export function FailuresPage() {
                   ? `人工处理 ${diagnoseFirstIncidents.length}`
                   : value,
             }))}
-          />
+          />}
           <Select
             allowClear
             value={errorCategory}
@@ -469,22 +501,33 @@ export function FailuresPage() {
           />
         </div>
         <div className="failure-toolbar-actions">
-          {selectedIds.length > 0 && (
+          <Button
+            icon={<HistoryOutlined />}
+            onClick={() => {
+              setShowHistory((current) => !current)
+              setHandlingScope('全部')
+              setSelectedIds([])
+              setSelectedIncident(null)
+            }}
+          >
+            {showHistory ? '返回失败队列' : `故障历史${resolvedIncidents.length ? `（${resolvedIncidents.length}）` : ''}`}
+          </Button>
+          {!showHistory && selectedIds.length > 0 && (
             <div className="failure-toolbar-selection">
               <span>已选 <strong className="mono">{selectedIds.length}</strong></span>
               <Tooltip title="取消选择"><Button type="text" aria-label="取消选择" icon={<CloseOutlined />} onClick={() => setSelectedIds([])} /></Tooltip>
             </div>
           )}
-          <Tooltip title={retryTargets.length ? `重试所选 ${retryTargets.length} 个故障` : '请先选择需要重试的故障'}>
+          {!showHistory && <Tooltip title={retryTargets.length ? `重试所选 ${retryTargets.length} 个故障` : '请先选择需要重试的故障'}>
             <span><Button icon={<ReloadOutlined />} disabled={!retryTargets.length} onClick={() => queueRetry(retryTargets)}>重试{retryTargets.length ? `（${retryTargets.length}）` : ''}</Button></span>
-          </Tooltip>
-          <Tooltip title={diagnosisTargets.length ? `诊断所选 ${diagnosisTargets.length} 个故障，同一网站会自动合并` : '请先选择需要诊断的故障'}>
+          </Tooltip>}
+          {!showHistory && <Tooltip title={diagnosisTargets.length ? `诊断所选 ${diagnosisTargets.length} 个故障，同一网站会自动合并` : '请先选择需要诊断的故障'}>
             <span><Button type="primary" icon={<RobotOutlined />} disabled={!diagnosisTargets.length} onClick={() => runDiagnosis(diagnosisTargets)}>AI 诊断{diagnosisTargets.length ? `（${diagnosisTargets.length}）` : ''}</Button></span>
-          </Tooltip>
+          </Tooltip>}
         </div>
       </div>
 
-      {batchFeedback && (
+      {!showHistory && batchFeedback && (
         <Alert
           className="failure-batch-feedback"
           type="success"
@@ -506,7 +549,7 @@ export function FailuresPage() {
           pagination={false}
           tableLayout="fixed"
           scroll={{ x: 1166 }}
-          rowSelection={{
+          rowSelection={showHistory ? undefined : {
             selectedRowKeys: selectedIds,
             onChange: (keys) => setSelectedIds(keys),
             columnWidth: 48,
@@ -514,10 +557,12 @@ export function FailuresPage() {
               disabled: Boolean(incident.workflow) || (retryingIds.includes(incident.id) && analysisQueuedIds.includes(incident.id)),
             }),
           }}
-          locale={{ emptyText: search ? '没有匹配的故障事件' : '当前分类没有故障事件' }}
+          locale={{ emptyText: search ? '没有匹配的故障事件' : showHistory ? '暂无已解决故障' : '当前没有需要处理的故障' }}
         />
       </section>
-      <div className="failure-summary">当前显示 {visibleIncidents.length} 个故障事件 · 待处理 {visibleIncidents.filter((incident) => incident.workflow?.status !== '已解决').length} 个 · 已解决 {visibleIncidents.filter((incident) => incident.workflow?.status === '已解决').length} 个 · 共影响 {visibleIncidents.reduce((sum, incident) => sum + incident.impact, 0)} 个页面</div>
+      <div className="failure-summary">{showHistory
+        ? `当前显示 ${visibleIncidents.length} 个已解决故障 · 共影响 ${visibleIncidents.reduce((sum, incident) => sum + incident.impact, 0)} 个页面`
+        : `当前显示 ${visibleIncidents.length} 个待处理或处理中故障 · 共影响 ${visibleIncidents.reduce((sum, incident) => sum + incident.impact, 0)} 个页面`}</div>
 
       <Modal
         className="failure-workbench-modal"
@@ -549,7 +594,7 @@ export function FailuresPage() {
               {analysisQueuedIds.includes(activeIncident.id) ? '诊断中' : 'AI 诊断'}
             </Button>}
             {activeIncident.workflow && <Button type="primary" icon={<RobotOutlined />} onClick={() => openWorkflow(activeIncident)}>
-              {activeIncident.workflow.status === '已解决' ? '查看重新执行结果' : activeIncident.workflow.status === '补采中' ? '查看数据恢复' : activeIncident.workflow.status === '验证中' ? '查看规则验证' : '查看诊断任务'}
+              {activeIncident.workflow.status === '已解决' ? '查看重试结果' : activeIncident.workflow.status === '重试中' ? '查看重试进度' : activeIncident.workflow.status === '补采中' ? '查看数据恢复' : activeIncident.workflow.status === '验证中' ? '查看规则验证' : '查看诊断任务'}
             </Button>}
           </div>
         )}
@@ -568,16 +613,18 @@ export function FailuresPage() {
                   {workflowStatusLabel(activeIncident.workflow?.status || (retryingIds.includes(activeIncident.id) ? '重试中' : analysisQueuedIds.includes(activeIncident.id) ? '诊断中' : activeIncident.handling.status))}
                 </span>
               </div>
-              <h3>{activeIncident.diagnosis.kind === 'rule' && activeIncident.workflow ? '使用新规则重新执行' : activeIncident.handling.strategy}</h3>
+              <h3>{activeIncident.diagnosis.kind === 'rule' && activeIncident.workflow ? '使用新规则重试' : activeIncident.handling.strategy}</h3>
               <p>{activeIncident.handling.reason}</p>
-              <small>下一步：{activeIncident.workflow?.status === '验证中'
+              <small>下一步：{activeIncident.workflow?.status === '重试中'
+                ? '系统正在用新规则完成验证、合并缺口采集和范围对账'
+                : activeIncident.workflow?.status === '验证中'
                 ? '系统正在验证新规则，通过后自动恢复已锁定的数据范围'
                 : activeIncident.workflow?.status === '补采中'
                   ? '系统正在按锁定范围重新执行并完成游标对账'
                   : activeIncident.workflow?.status === '已解决'
-                    ? '原失败执行保留失败事实，处置结果已关联到本次重新执行'
+                    ? '原失败执行保留失败事实，处置结果已关联到本次故障重试'
                     : activeIncident.workflow?.status === '待修复规则'
-                      ? '完成规则订正和自动回归，确认范围后发布并重新执行'
+                      ? '完成规则订正和自动回归，确认范围后发布规则并重试'
                       : retryingIds.includes(activeIncident.id)
                 ? '正在重试失败页面并验证结果'
                 : analysisQueuedIds.includes(activeIncident.id)
@@ -600,20 +647,21 @@ export function FailuresPage() {
 
             {activeIncident.workflow?.recoveryPlan && (
               <section className="failure-workbench-section failure-recovery-plan">
-                <div className="failure-section-heading"><h3>重新执行范围</h3><span>{activeIncident.workflow.recoveryPlan.mode}</span></div>
+                <div className="failure-section-heading"><h3>合并重试范围</h3><span>{activeIncident.workflow.recoveryPlan.mode}</span></div>
                 <div className="failure-recovery-grid">
                   <div><span>范围起点</span><strong>{activeIncident.workflow.recoveryPlan.start}</strong></div>
                   <div><span>范围终点</span><strong>{activeIncident.workflow.recoveryPlan.end}</strong></div>
                   <div><span>区间口径</span><strong>{activeIncident.workflow.recoveryPlan.boundary || '起点不含，终点包含；失败执行不推进游标'}</strong></div>
                   <div><span>范围依据</span><strong>{activeIncident.workflow.recoveryPlan.basis}</strong></div>
                   <div><span>入库与对账</span><strong>{activeIncident.workflow.reconciliation || activeIncident.workflow.recoveryPlan.deduplication}</strong></div>
-                  <div><span>关闭条件</span><strong>{activeIncident.workflow.recoveryPlan.closure || '数据恢复成功且区间对账无未覆盖游标后关闭故障'}</strong></div>
-                  {activeRecoveryExecution?.status === '成功' && <div><span>恢复数量口径</span><strong>故障影响 {activeIncident.impact} 个页面；恢复发现 {activeRecoveryExecution.discovered} 条，入库 {activeRecoveryExecution.articles} 条，重复 {Math.max(0, activeRecoveryExecution.discovered - activeRecoveryExecution.articles)} 条</strong></div>}
+                  <div><span>关闭条件</span><strong>{activeIncident.workflow.recoveryPlan.closure || '故障重试成功且范围对账无未覆盖游标后关闭故障'}</strong></div>
+                  {activeRetryExecution?.status === '成功' && <div><span>重试数量口径</span><strong>故障影响 {activeIncident.impact} 个页面；重试发现 {activeRetryExecution.discovered} 条，入库 {activeRetryExecution.articles} 条，重复 {Math.max(0, activeRetryExecution.discovered - activeRetryExecution.articles)} 条</strong></div>}
                 </div>
                 <div className="failure-recovery-links">
                   <span>原失败执行：{activeIncident.workflow.sourceExecutionIds?.join('、') || activeIncident.workflow.sourceExecutionId || '未关联'}</span>
-                  <span>规则验证执行：{activeIncident.workflow.validationExecutionId || '待创建'}</span>
-                  <span>数据恢复执行：{activeIncident.workflow.recoveryExecutionId || '待创建'}</span>
+                  {activeIncident.workflow.retryExecutionId
+                    ? <span>故障重试执行：{activeIncident.workflow.retryExecutionId}（验证、采集与对账合并记录）</span>
+                    : <><span>规则验证执行：{activeIncident.workflow.validationExecutionId || '待创建'}</span><span>数据恢复执行：{activeIncident.workflow.recoveryExecutionId || '待创建'}</span></>}
                 </div>
               </section>
             )}

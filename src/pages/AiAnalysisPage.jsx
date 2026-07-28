@@ -378,6 +378,7 @@ export function AiAnalysisPage() {
   const selectedSourceExecution = selected?.sourceExecutionId || fromExecution || ''
   const selectedFailure = selected?.failureId || fromFailure || ''
   const isFailureRepair = selected?.analysisKind === 'diagnose' || Boolean(selectedFailure)
+  const selectedRetryExecutionId = selected?.retryExecutionId || selected?.recoveryExecutionId || selected?.validationExecutionId || ''
   const selectedSourceExecutionIds = [...new Set([...(selected?.sourceExecutionIds || []), selectedSourceExecution].filter(Boolean))]
   const selectedSourceExecutions = executions.filter((execution) => selectedSourceExecutionIds.includes(execution.id))
   const validSourceExecutionIds = selectedSourceExecutions.map((execution) => execution.id)
@@ -441,8 +442,8 @@ export function AiAnalysisPage() {
     if (!result?.ok) return message.error(result?.reason || '审核失败，请重新加载后再试')
     setHandoffEntryId(selected.id)
     setEditingConfig(false)
-    message.success(result.validationExecutionId
-      ? `规则 ${result.version} 已发布，系统正在按锁定范围重新执行`
+    message.success(result.retryExecutionId
+      ? `规则 ${result.version} 已发布，故障重试已开始`
       : result.syncedTasks
         ? `审核通过，规则 ${result.version} 已发布，并更新 ${result.syncedTasks} 个采集计划`
         : `审核通过，规则 ${result.version} 已发布`)
@@ -452,19 +453,19 @@ export function AiAnalysisPage() {
     if (!automaticRegression.passed) return message.error(`自动回归未通过：${automaticRegression.reason}`)
     if (!isFailureRepair) return completeApproval()
     modal.confirm({
-      title: '确认使用新规则重新执行？',
+      title: '确认使用新规则重试？',
       width: 560,
-      okText: '发布并重新执行',
+      okText: '发布规则并重试',
       cancelText: '继续检查',
       content: <div className="ai-recovery-confirm">
-        <p>新规则发布后，系统将创建新的执行记录；原失败执行继续保留“失败”事实。</p>
+        <p>新规则发布后，系统只创建一条故障重试记录；全部原失败执行继续保留“失败”事实。</p>
         <dl>
           <div><dt>预计起点</dt><dd>{recoveryPreview.start}</dd></div>
           <div><dt>预计终点</dt><dd>{recoveryPreview.end}</dd></div>
           <div><dt>来源范围</dt><dd>{recoveryPreview.source}</dd></div>
           <div><dt>区间口径</dt><dd>{recoveryPreview.boundary}</dd></div>
         </dl>
-        <small>系统会先验证新规则，再自动恢复锁定范围并完成幂等入库与对账。</small>
+        <small>规则验证、缺口采集和范围对账是同一次故障重试的内部阶段，不会拆成多条采集记录。</small>
       </div>,
       onOk: completeApproval,
     })
@@ -525,8 +526,8 @@ export function AiAnalysisPage() {
   }
 
   const continueApprovedFlow = () => {
-    if (selected.validationExecutionId) {
-      navigate(`/executions/${selected.validationExecutionId}`)
+    if (selectedRetryExecutionId) {
+      navigate(`/executions/${selectedRetryExecutionId}`)
       return
     }
     if (selectedSourceExecution) {
@@ -901,8 +902,8 @@ export function AiAnalysisPage() {
   const isReleaseHandoff = releasePhase === 'published'
   const isHistorical = !isActiveAnalysis(selected)
   const releaseVersion = selected.releaseVersion || selectedRule?.version || '-'
-  const approvalNextLabel = selected.validationExecutionId
-    ? '查看重新执行进度'
+  const approvalNextLabel = selectedRetryExecutionId
+    ? '查看重试进度'
     : isFailureRepair
       ? '查看故障进度'
     : selected.analysisKind === 'onboarding' || !matchingTasks.length
@@ -1007,9 +1008,9 @@ export function AiAnalysisPage() {
               <div className="ai-handoff-icon success"><CheckCircleOutlined /></div>
               <div>
                 <span className="ai-handoff-eyebrow">审核与发布已完成</span>
-                <h1>{selected.validationExecutionId ? '新规则已发布，正在重新执行' : '采集规则已发布'}</h1>
+                <h1>{selectedRetryExecutionId ? '新规则已发布，故障重试已开始' : '采集规则已发布'}</h1>
                 <p>{isFailureRepair
-                  ? '原失败执行仍保留失败事实；系统正在依次完成规则验证、数据恢复和范围对账。'
+                  ? '原失败执行仍保留失败事实；规则验证、缺口采集和范围对账统一归入一条故障重试记录。'
                   : 'AI 自动回归和人工审核均已通过，规则已经同步到网站资产。'}</p>
               </div>
             </div>
@@ -1017,8 +1018,8 @@ export function AiAnalysisPage() {
             <div className="ai-handoff-facts">
               <div><span>发布版本</span><strong className="mono">{releaseVersion}</strong><small>已同步网站资产</small></div>
               <div><span>AI 自动回归</span><strong>已通过</strong><small>{selected.regressionPassed || selectedRule?.regressionPassed || 20}/{selected.regressionTotal || selectedRule?.regressionTotal || 20} 个样本</small></div>
-              {selected.validationExecutionId
-                ? <div><span>重新执行范围</span><strong className="mono">{selected.validationExecutionId}</strong><small>{selected.recoveryPlan?.start || '最后成功游标'} → {selected.recoveryPlan?.end || '修复发布时刻'}</small></div>
+              {selectedRetryExecutionId
+                ? <div><span>故障重试</span><strong className="mono">{selectedRetryExecutionId}</strong><small>{selected.recoveryPlan?.start || '最后成功游标'} → {selected.recoveryPlan?.end || '修复发布时刻'}</small></div>
                 : <div><span>影响范围</span><strong>{matchingTasks.length} 个采集计划</strong><small>{followingTasks.length} 个将跟随最新版本</small></div>}
             </div>
 
@@ -1027,8 +1028,7 @@ export function AiAnalysisPage() {
               <i />
               <div className="done"><b><CheckOutlined /></b><span><strong>人工审核</strong><small>已通过</small></span></div>
               <i />
-              <div className={selected.validationExecutionId ? 'active' : 'done'}><b>{selected.validationExecutionId ? 3 : <CheckOutlined />}</b><span><strong>{selected.validationExecutionId ? '规则验证' : '发布上线'}</strong><small>{selected.validationExecutionId ? '执行中' : '已完成'}</small></span></div>
-              {selected.validationExecutionId && <><i /><div><b>4</b><span><strong>数据恢复</strong><small>验证通过后自动开始</small></span></div></>}
+              <div className={selectedRetryExecutionId ? 'active' : 'done'}><b>{selectedRetryExecutionId ? 3 : <CheckOutlined />}</b><span><strong>{selectedRetryExecutionId ? '故障重试' : '发布上线'}</strong><small>{selectedRetryExecutionId ? '验证、采集和对账进行中' : '已完成'}</small></span></div>
             </div>
 
             <div className="ai-handoff-actions">
@@ -1052,7 +1052,7 @@ export function AiAnalysisPage() {
             ) : (
               <>
                 <Button icon={<ReloadOutlined />} disabled={isRestarting} onClick={() => runAnalysis()}>{selected.status === '分析中' ? '重新开始分析' : '重新分析'}</Button>
-                <Button type="primary" icon={<CheckOutlined />} title={reviewBlockedReason} disabled={Boolean(reviewBlockedReason)} onClick={approveSelected}>{selected.status === '待确认归属' ? '确认规则' : reviewBlockedReason ? (isFailureRepair ? '暂不可重新执行' : '暂不可审核') : (isFailureRepair ? '发布并重新执行' : '审核通过')}</Button>
+                <Button type="primary" icon={<CheckOutlined />} title={reviewBlockedReason} disabled={Boolean(reviewBlockedReason)} onClick={approveSelected}>{selected.status === '待确认归属' ? '确认规则' : reviewBlockedReason ? (isFailureRepair ? '暂不可重试' : '暂不可审核') : (isFailureRepair ? '发布规则并重试' : '审核通过')}</Button>
               </>
             )}
           </div>
@@ -1073,9 +1073,9 @@ export function AiAnalysisPage() {
             className="ai-flow-context"
             type="warning"
             showIcon
-            title={`使用新规则重新执行 ${selected.site} 的失败采集`}
+            title={`使用新规则重试 ${selected.site} 的失败采集`}
             description={<div className="ai-recovery-preview">
-              <p>{validSourceExecutionIds.length ? `关联 ${validSourceExecutionIds.join('、')}` : selectedFailure || '来源：失败队列'}。发布前请确认预计恢复范围；系统会创建新执行，不覆盖原失败记录。</p>
+              <p>{validSourceExecutionIds.length ? `关联 ${validSourceExecutionIds.join('、')}` : selectedFailure || '来源：失败队列'}。发布前请确认合并重试范围；系统只新增一条故障重试，不覆盖原失败记录。</p>
               <dl>
                 <div><dt>预计起点</dt><dd>{recoveryPreview.start}</dd></div>
                 <div><dt>预计终点</dt><dd>{recoveryPreview.end}</dd></div>

@@ -9,8 +9,10 @@ import { recordDetails } from '../data'
 import { getSiteRulePath, getSiteWorkspacePath } from '../app/routes'
 
 const { RangePicker } = DatePicker
+const EXECUTION_STATUS_OPTIONS = ['进行中', '成功', '需要处理', '处理中', '已处置', '已取消']
 
 function getExecutionType(row, tasks) {
+  if (row.collectionType === '故障重试' || row.purpose === '故障重试') return '故障重试'
   if (row.collectionType === '修复验证') return '规则验证'
   if (row.collectionType === '缺口补采') return '数据恢复'
   if (row.collectionType) return row.collectionType
@@ -24,6 +26,25 @@ function getExecutionType(row, tasks) {
 function getExecutionResult(row) {
   if (row.purpose === '修复验证') return `${row.validationPassed || row.discovered || 0}/${row.validationTotal || row.discovered || 5} 样本`
   return `${row.articles.toLocaleString()} 条入库`
+}
+
+function getExecutionBusinessStatus(row, workflow) {
+  const originalStatus = row.status === '部分失败' ? '部分成功' : row.status
+  if (row.resolution || workflow?.status === '已解决') {
+    return { label: `${originalStatus} · 已处置`, group: '已处置' }
+  }
+  if (['失败', '部分失败', '部分成功'].includes(row.status)) {
+    if (['诊断中', '重试中', '验证中', '补采中'].includes(workflow?.status)) {
+      return { label: `${originalStatus} · 处理中`, group: '处理中' }
+    }
+    return { label: `${originalStatus} · 待处理`, group: '需要处理' }
+  }
+  if (['排队中', '运行中', '重试中'].includes(row.status)) {
+    return { label: row.status, group: '进行中' }
+  }
+  if (row.status === '成功') return { label: '成功', group: '成功' }
+  if (['已取消', '取消'].includes(row.status)) return { label: '已取消', group: '已取消' }
+  return { label: row.status, group: row.status }
 }
 
 function getExecutionDate(value) {
@@ -85,8 +106,10 @@ function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewRule,
     ))
   }, [detailSearch, records])
   const isValidation = execution?.purpose === '修复验证'
+  const isFailureRetry = execution?.purpose === '故障重试'
   const validationPassed = execution?.validationPassed || execution?.discovered || 0
   const validationTotal = execution?.validationTotal || execution?.discovered || 5
+  const sourceExecutionCount = execution?.recoveryPlan?.sourceExecutionIds?.length || (execution?.retryOf ? 1 : 0)
 
   useEffect(() => {
     setDetailSearch('')
@@ -113,7 +136,7 @@ function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewRule,
           <span className="batch-details-title-icon"><DatabaseOutlined /></span>
           <div>
             <div className="batch-details-title-line"><strong>采集明细</strong><span className="mono">{getBatchId(execution)}</span></div>
-            <p>{execution.site} · {execution.collectionType || execution.purpose || '采集执行'} · {isValidation ? <>验证样本 <b className="mono">{validationPassed}/{validationTotal}</b></> : <>入库 <b className="mono">{execution.articles.toLocaleString()}</b> 条</>} · {execution.finishedAt}{execution.retryOf ? <> · 关联原执行 <b className="mono">{getBatchId({ id: execution.retryOf })}</b></> : null}</p>
+            <p>{execution.site} · {execution.collectionType || execution.purpose || '采集执行'} · {isValidation ? <>验证样本 <b className="mono">{validationPassed}/{validationTotal}</b></> : <>入库 <b className="mono">{execution.articles.toLocaleString()}</b> 条</>} · {execution.finishedAt}{sourceExecutionCount > 1 ? <> · 关联 <b className="mono">{sourceExecutionCount}</b> 个原失败执行</> : execution.retryOf ? <> · 关联原执行 <b className="mono">{getBatchId({ id: execution.retryOf })}</b></> : null}</p>
           </div>
         </div>
       )}
@@ -124,16 +147,20 @@ function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewRule,
           type="success"
           showIcon
           title="原执行结果保留为失败，关联故障已经完成处置"
-          description={`修复规则 ${execution.resolution.ruleVersion} 已通过验证，并完成 ${execution.resolution.recoveryPlan?.start || '最后成功游标'} 到 ${execution.resolution.recoveryPlan?.end || '修复发布时刻'} 的数据恢复。`}
-          action={<Button type="primary" onClick={() => onViewExecution(execution.resolution.recoveryExecutionId)}>查看重新执行结果</Button>}
+          description={`修复规则 ${execution.resolution.ruleVersion} 已通过验证，并完成 ${execution.resolution.recoveryPlan?.start || '最后成功游标'} 到 ${execution.resolution.recoveryPlan?.end || '修复发布时刻'} 的故障重试。`}
+          action={<Button type="primary" onClick={() => onViewExecution(execution.resolution.retryExecutionId || execution.resolution.recoveryExecutionId)}>查看重试结果</Button>}
         />
       )}
       {execution?.recoveryPlan && (
         <Alert
           className="execution-recovery-alert"
-          type={execution.purpose === '缺口补采' ? 'warning' : 'info'}
+          type={['缺口补采', '故障重试'].includes(execution.purpose) ? 'warning' : 'info'}
           showIcon
-          title={execution.purpose === '缺口补采' ? '本执行用于恢复历史缺口，不覆盖原失败执行' : '新规则验证通过后自动开始数据恢复'}
+          title={isFailureRetry
+            ? `一次故障重试覆盖 ${sourceExecutionCount} 个原失败执行`
+            : execution.purpose === '缺口补采'
+              ? '本执行用于恢复历史缺口，不覆盖原失败执行'
+              : '新规则验证通过后自动开始数据恢复'}
           description={`${execution.recoveryPlan.start} → ${execution.recoveryPlan.end}；${execution.recoveryPlan.boundary || '起点不含，终点包含；失败执行不推进游标'}；${execution.recoveryPlan.basis}；${execution.reconciliation || execution.recoveryPlan.deduplication}。`}
         />
       )}
@@ -151,11 +178,17 @@ function BatchDetailsModal({ execution, open, onClose, onRepairRule, onViewRule,
             : <Button onClick={() => onViewTask(execution)}>查看采集计划</Button>}
         />
       )}
-      {execution?.logs?.length > 0 && ['失败', '部分失败'].includes(execution.status) && (
+      {execution?.logs?.length > 0 && (['失败', '部分失败'].includes(execution.status) || isFailureRetry) && (
         <details className="execution-diagnostic-log">
-          <summary>查看执行日志</summary>
+          <summary>{isFailureRetry ? '查看重试过程日志' : '查看执行日志'}</summary>
           <pre className="mono">{execution.logs.join('\n')}</pre>
         </details>
+      )}
+      {isFailureRetry && (
+        <section className="execution-validation-result" aria-label="故障重试过程">
+          <CheckCircleOutlined />
+          <div><span>故障重试过程</span><strong>{execution.status === '成功' ? '规则验证、缺口采集和范围对账均已完成' : '正在验证新规则并恢复合并缺口'}</strong><small>这三个阶段归入同一条故障重试记录；所有原失败执行单独保留并关联到本记录。</small></div>
+        </section>
       )}
       {isValidation ? (
         <section className="execution-validation-result" aria-label="规则验证结果">
@@ -213,7 +246,7 @@ function ExecutionsList({ initialExecution }) {
   const { search } = useOutletContext()
   const [params] = useSearchParams()
   const screens = Grid.useBreakpoint()
-  const { executions, tasks, sites } = usePrototype()
+  const { executions, tasks, sites, failureWorkflows } = usePrototype()
   const statusParam = params.get('status')
   const siteParam = params.get('site')
   const [siteFilter, setSiteFilter] = useState(siteParam || undefined)
@@ -222,15 +255,30 @@ function ExecutionsList({ initialExecution }) {
   const [dateRange, setDateRange] = useState(null)
   const [selectedExecution, setSelectedExecution] = useState(initialExecution || null)
 
-  const executionRows = useMemo(() => executions.map((row) => ({
-    ...row,
-    collectionType: getExecutionType(row, tasks),
-  })), [executions, tasks])
+  const workflowByExecution = useMemo(() => {
+    const workflows = new Map()
+    Object.values(failureWorkflows).forEach((workflow) => {
+      ;[...new Set([...(workflow.sourceExecutionIds || []), workflow.sourceExecutionId].filter(Boolean))].forEach((executionId) => {
+        workflows.set(executionId, workflow)
+      })
+    })
+    return workflows
+  }, [failureWorkflows])
 
-  const visible = useMemo(() => executions.filter((row) => (
+  const executionRows = useMemo(() => executions.map((row) => {
+    const businessStatus = getExecutionBusinessStatus(row, workflowByExecution.get(row.id))
+    return {
+      ...row,
+      collectionType: getExecutionType(row, tasks),
+      businessStatus: businessStatus.label,
+      statusGroup: businessStatus.group,
+    }
+  }), [executions, tasks, workflowByExecution])
+
+  const visible = useMemo(() => executionRows.filter((row) => (
     (!siteFilter || row.site === siteFilter)
-    && (!typeFilter || getExecutionType(row, tasks) === typeFilter)
-    && (!statusFilter || row.status === statusFilter)
+    && (!typeFilter || row.collectionType === typeFilter)
+    && (!statusFilter || row.statusGroup === statusFilter)
     && (!dateRange || (() => {
       const executionDate = getExecutionDate(row.finishedAt)
       return executionDate
@@ -238,11 +286,11 @@ function ExecutionsList({ initialExecution }) {
         && !executionDate.isAfter(dateRange[1].endOf('day'))
     })())
     && `${row.id}${getBatchId(row)}${row.site}采集计划${row.site}${row.url}`.toLowerCase().includes(search.trim().toLowerCase())
-  )), [executions, tasks, search, siteFilter, typeFilter, statusFilter, dateRange])
+  )), [dateRange, executionRows, search, siteFilter, statusFilter, typeFilter])
 
   const siteOptions = useMemo(() => [...new Set(executionRows.map((row) => row.site))].map((value) => ({ value, label: value })), [executionRows])
   const typeOptions = useMemo(() => [...new Set(executionRows.map((row) => row.collectionType))].map((value) => ({ value, label: value })), [executionRows])
-  const statusOptions = useMemo(() => [...new Set(executionRows.map((row) => row.status))].map((value) => ({ value, label: value })), [executionRows])
+  const statusOptions = EXECUTION_STATUS_OPTIONS.map((value) => ({ value, label: value }))
 
   useEffect(() => {
     setStatusFilter(statusParam || undefined)
@@ -277,7 +325,7 @@ function ExecutionsList({ initialExecution }) {
 
   const renderActions = (row) => {
     const menuItems = [
-      ...(row.resolution ? [{ key: 'resolution', icon: <CheckCircleOutlined />, label: '查看重新执行结果', onClick: () => navigate(`/executions/${row.resolution.recoveryExecutionId}`) }] : []),
+      ...(row.resolution ? [{ key: 'resolution', icon: <CheckCircleOutlined />, label: '查看重试结果', onClick: () => navigate(`/executions/${row.resolution.retryExecutionId || row.resolution.recoveryExecutionId}`) }] : []),
       ...(isRuleFailure(row) && !row.resolution ? [{ key: 'repair-rule', icon: <ToolOutlined />, label: '修复网站规则', onClick: () => navigate(getExecutionRulePath(row, true)) }] : []),
       { key: 'task', icon: <CalendarOutlined />, label: '查看采集计划', onClick: () => {
         const site = getExecutionSite(row)
@@ -298,7 +346,7 @@ function ExecutionsList({ initialExecution }) {
     { title: '执行结果', width: 110, align: 'right', render: (_, row) => <span className="mono value-strong">{getExecutionResult(row)}</span> },
     { title: '耗时', dataIndex: 'duration', width: 82, align: 'right', render: (value) => <span className="mono muted execution-duration">{value}</span> },
     { title: '完成时间', dataIndex: 'finishedAt', width: 116, render: (value) => <span className="mono muted execution-finished-at">{value}</span> },
-    { title: '状态', dataIndex: 'status', width: 138, render: (value, row) => <div className="execution-status-stack"><StatusTag value={value} />{row.resolution && <StatusTag value="已处置" />}</div> },
+    { title: '状态', dataIndex: 'businessStatus', width: 154, render: (value) => <StatusTag value={value} /> },
     { title: '操作', width: 72, fixed: 'right', align: 'right', render: (_, row) => renderActions(row) },
   ]
 
@@ -309,7 +357,7 @@ function ExecutionsList({ initialExecution }) {
         <div className="records-filters" aria-label="采集记录筛选">
           <Select aria-label="按数据源筛选" allowClear value={siteFilter} placeholder="全部数据源" options={siteOptions} onChange={setSiteFilter} />
           <Select aria-label="按采集类型筛选" allowClear value={typeFilter} placeholder="采集类型" options={typeOptions} onChange={setTypeFilter} />
-          <Select aria-label="按执行状态筛选" allowClear value={statusFilter} placeholder="执行状态" options={statusOptions} onChange={setStatusFilter} />
+          <Select aria-label="按状态筛选" allowClear value={statusFilter} placeholder="全部状态" options={statusOptions} onChange={setStatusFilter} />
           <RangePicker aria-label="按完成日期筛选" allowClear value={dateRange} onChange={setDateRange} placeholder={['开始日期', '结束日期']} />
           {(siteFilter || typeFilter || statusFilter || dateRange) && <Button type="text" icon={<ClearOutlined />} onClick={clearFilters}>重置</Button>}
         </div>
@@ -320,7 +368,7 @@ function ExecutionsList({ initialExecution }) {
           <div className="execution-mobile-list">
             {visible.map((row) => (
               <article className="execution-mobile-item" key={row.id}>
-                <div className="execution-mobile-head"><EntityLink className="execution-mobile-id" title={getBatchId(row)} titleClassName="mono" onClick={() => openDetails(row)} ariaLabel={`查看批次 ${getBatchId(row)}`} /><div className="execution-status-stack"><StatusTag value={row.status} />{row.resolution && <StatusTag value="已处置" />}</div></div>
+                <div className="execution-mobile-head"><EntityLink className="execution-mobile-id" title={getBatchId(row)} titleClassName="mono" onClick={() => openDetails(row)} ariaLabel={`查看批次 ${getBatchId(row)}`} /><StatusTag value={row.businessStatus} /></div>
                 <div className="execution-mobile-source"><strong>{row.site}</strong></div>
                 <dl>
                   <div><dt>采集类型</dt><dd>{getExecutionType(row, tasks)}</dd></div>
@@ -336,7 +384,7 @@ function ExecutionsList({ initialExecution }) {
         </section>
       ) : (
         <SectionCard bodyStyle={{ padding: 0 }}>
-          <Table rowKey="id" columns={columns} dataSource={executionRows.filter((row) => visible.some((item) => item.id === row.id))} pagination={{ pageSize: 10, showSizeChanger: false }} tableLayout="fixed" scroll={{ x: 1007 }} />
+          <Table rowKey="id" columns={columns} dataSource={visible} pagination={{ pageSize: 10, showSizeChanger: false }} tableLayout="fixed" scroll={{ x: 1023 }} />
         </SectionCard>
       )}
       <BatchDetailsModal
