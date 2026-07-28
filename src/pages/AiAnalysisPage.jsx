@@ -8,7 +8,6 @@ import {
   CloseOutlined,
   CodeOutlined,
   CopyOutlined,
-  DownOutlined,
   EditOutlined,
   ExpandAltOutlined,
   HistoryOutlined,
@@ -20,7 +19,6 @@ import {
   RobotOutlined,
   RocketOutlined,
   StopOutlined,
-  UpOutlined,
   WarningOutlined,
 } from '@ant-design/icons'
 import { useLocation, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
@@ -256,54 +254,44 @@ function buildAgentLogs(entry) {
   return [...completed, { time: '14:32:14', level: 'success', agent: 'Config Agent', stage: '生成采集配置', message: '采集配置已生成，等待人工审核' }]
 }
 
-function AgentExecutionLog({ entry, expanded, onToggle }) {
+function AgentExecutionLogModal({ entry, open, onClose }) {
   const logs = buildAgentLogs(entry)
-  const lastLog = logs.at(-1)
   const isLive = entry.status === '分析中'
   const isFailed = entry.status === '分析失败'
   const levelLabels = { success: 'DONE', active: 'RUN', warning: 'WARN', error: 'ERROR', stopped: 'STOP' }
 
   return (
-    <section className={`analysis-surface ai-agent-log-card${isFailed ? ' failed' : ''}`}>
-      <header className="ai-agent-log-header">
-        <div className="ai-agent-log-title">
-          <RobotOutlined />
-          <h2>Agent 执行日志</h2>
-          {isLive && <span className="ai-live-indicator"><i />实时</span>}
-          {isFailed && <StatusTag value="分析失败" />}
-        </div>
-        <div className="ai-agent-log-actions">
+    <Modal
+      className="ai-agent-log-modal"
+      title={<span className="ai-agent-log-modal-title"><CodeOutlined />Agent 执行日志</span>}
+      open={open}
+      width={900}
+      footer={null}
+      destroyOnHidden
+      onCancel={onClose}
+    >
+      <div className="ai-agent-log-modal-meta">
+        <div>
+          <strong>{entry.site}</strong>
           <span className="mono">尝试 #{entry.analysisAttempt || 1} · {logs.length} 条</span>
-          <Button
-            type="text"
-            size="small"
-            icon={expanded ? <UpOutlined /> : <DownOutlined />}
-            aria-expanded={expanded}
-            onClick={onToggle}
-          >{expanded ? '收起' : '展开'}</Button>
         </div>
-      </header>
-      {expanded ? (
-        <div className="ai-agent-log-stream" aria-live={isLive ? 'polite' : 'off'}>
-          {logs.map((log, index) => (
-            <div className={`ai-agent-log-row ${log.level}`} key={`${log.time}-${log.agent}-${index}`}>
-              <time className="mono">{log.time}</time>
-              <span className={`ai-agent-log-level ${log.level}`}>{levelLabels[log.level]}</span>
-              <strong>{log.agent}</strong>
-              <span className="ai-agent-log-stage">{log.stage}</span>
-              <p className="mono">{log.message}</p>
-            </div>
-          ))}
+        <div>
+          {isLive && <span className="ai-live-indicator"><i />实时</span>}
+          {isFailed ? <StatusTag value="分析失败" /> : <StatusTag value={entry.status} />}
         </div>
-      ) : (
-        <button className="ai-agent-log-summary" type="button" onClick={onToggle}>
-          <span className={`ai-agent-log-level ${lastLog.level}`}>{levelLabels[lastLog.level]}</span>
-          <strong>{lastLog.stage}</strong>
-          <span className="mono">{lastLog.message}</span>
-          <DownOutlined />
-        </button>
-      )}
-    </section>
+      </div>
+      <div className="ai-agent-log-stream" aria-live={isLive ? 'polite' : 'off'}>
+        {logs.map((log, index) => (
+          <div className={`ai-agent-log-row ${log.level}`} key={`${log.time}-${log.agent}-${index}`}>
+            <time className="mono">{log.time}</time>
+            <span className={`ai-agent-log-level ${log.level}`}>{levelLabels[log.level]}</span>
+            <strong>{log.agent}</strong>
+            <span className="ai-agent-log-stage">{log.stage}</span>
+            <p className="mono">{log.message}</p>
+          </div>
+        ))}
+      </div>
+    </Modal>
   )
 }
 
@@ -351,7 +339,7 @@ export function AiAnalysisPage() {
   const [repairPrompt, setRepairPrompt] = useState('')
   const [workingUrlId, setWorkingUrlId] = useState('')
   const [handoffEntryId, setHandoffEntryId] = useState('')
-  const [agentLogExpanded, setAgentLogExpanded] = useState(false)
+  const [agentLogOpen, setAgentLogOpen] = useState(false)
   const analysisTimersRef = useRef(new Map())
   const [createForm] = Form.useForm()
 
@@ -493,8 +481,8 @@ export function AiAnalysisPage() {
   const automaticRegression = selected ? validateGeneratedConfig(configText) : { passed: false, passedCount: 0, total: 20, reason: '' }
 
   useEffect(() => {
-    setAgentLogExpanded(['分析中', '分析失败', '已停止'].includes(selected?.status))
-  }, [selected?.id, selected?.status])
+    setAgentLogOpen(false)
+  }, [selected?.id])
 
   const paramsForEntry = (entry) => {
     const nextParams = new URLSearchParams({ entry: entry.id, site: getHost(entry.url) })
@@ -519,7 +507,6 @@ export function AiAnalysisPage() {
     if (existingTimerId) window.clearTimeout(existingTimerId)
     const nextAttempt = (selected.analysisAttempt || 1) + 1
     setWorkingUrlId(selected.id)
-    setAgentLogExpanded(true)
     updateSelected({
       status: '分析中',
       issue: '',
@@ -569,7 +556,6 @@ export function AiAnalysisPage() {
         analysisTimersRef.current.delete(selected.id)
         const stoppedAt = new Date().toLocaleTimeString('zh-CN', { hour12: false })
         setWorkingUrlId('')
-        setAgentLogExpanded(true)
         updateSelected({
           status: '已停止',
           judgment: '待重新分析',
@@ -1209,6 +1195,17 @@ export function AiAnalysisPage() {
             <span className="mono">{selected.url}</span>
           </div>
           <div className="ai-detail-actions">
+            {!isQueued && (
+              <Tooltip title="查看 Agent 执行日志">
+                <Button
+                  className="ai-agent-log-trigger"
+                  type="text"
+                  icon={<CodeOutlined />}
+                  aria-label="查看 Agent 执行日志"
+                  onClick={() => setAgentLogOpen(true)}
+                />
+              </Tooltip>
+            )}
             {isHistorical ? (
               <Button type="primary" icon={<ReloadOutlined />} onClick={restartHistoricalAnalysis}>重新分析</Button>
             ) : isQueued ? (
@@ -1223,6 +1220,8 @@ export function AiAnalysisPage() {
             )}
           </div>
         </section>
+
+        <AgentExecutionLogModal entry={selected} open={agentLogOpen} onClose={() => setAgentLogOpen(false)} />
 
         {isHistorical && (
           <Alert
@@ -1336,8 +1335,6 @@ export function AiAnalysisPage() {
                 </dl>
               </section>
             )}
-
-            <AgentExecutionLog entry={selected} expanded={agentLogExpanded} onToggle={() => setAgentLogExpanded((value) => !value)} />
 
             {!isAnalyzing && !isAnalysisFailed && !isStopped && (
               <>
